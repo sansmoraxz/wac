@@ -1,4 +1,4 @@
-use wac_types::HeapType;
+use wac_types::{HeapType, Package, Types};
 
 #[test]
 fn shared_heap_type_returns_error() {
@@ -45,4 +45,23 @@ fn non_shared_heap_type_succeeds() {
     let result: Result<HeapType, _> = heap.try_into();
     assert!(result.is_ok(), "non-shared heap types should convert fine");
     assert_eq!(result.unwrap(), HeapType::Func);
+}
+
+#[test]
+fn concrete_heap_type_in_module_type_returns_error() {
+    let bytes = wat::parse_str(
+        r#"(component
+            (import "m" (core module
+                (type (func))
+                (import "a" "g" (global (ref null 0)))
+            ))
+        )"#,
+    )
+    .unwrap();
+
+    let err = Package::from_bytes("test:pkg", None, bytes, &mut Types::default()).unwrap_err();
+    assert!(
+        err.to_string().contains("concrete heap types"),
+        "error should mention concrete heap types: {err}"
+    );
 }

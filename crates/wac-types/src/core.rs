@@ -349,7 +349,10 @@ impl TryFrom<wasmparser::HeapType> for HeapType {
                 anyhow::bail!("shared heap types are not supported: {ty:?}")
             }
             wasmparser::HeapType::Concrete(index) => {
-                Self::Concrete(index.as_module_index().unwrap())
+                // Validation replaces a module's type indices with type ids.
+                Self::Concrete(index.as_module_index().ok_or_else(|| {
+                    anyhow::anyhow!("concrete heap types are not yet supported in module types")
+                })?)
             }
             wasmparser::HeapType::Exact(_) => {
                 anyhow::bail!("exact heap types are not yet supported")
