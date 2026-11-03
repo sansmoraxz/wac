@@ -1,0 +1,20 @@
+(component
+  (import "r" (type (;0;) (sub resource)))
+  (type (;1;) (borrow 0))
+  (type (;2;) (func (param "self" 1)))
+  (import "[method]r.f" (func (;0;) (type 2)))
+  (type (;3;)
+    (component
+      (import "r" (type (;0;) (sub resource)))
+      (type (;1;) (borrow 0))
+      (type (;2;) (func (param "self" 1)))
+      (import "[method]r.f" (func (;0;) (type 2)))
+    )
+  )
+  (import "unlocked-dep=<test:foo>" (component (;0;) (type 3)))
+  (instance (;0;) (instantiate 0
+      (with "r" (type 0))
+      (with "[method]r.f" (func 0))
+    )
+  )
+)

@@ -741,7 +741,6 @@ impl<'a> TypeEncoder<'a> {
     }
 
     fn borrow(&self, state: &mut State, res: ResourceId) -> u32 {
-        assert!(!state.scopes.is_empty());
         let res = state.current.resources[self.0[res].name.as_str()];
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().borrow(res);
