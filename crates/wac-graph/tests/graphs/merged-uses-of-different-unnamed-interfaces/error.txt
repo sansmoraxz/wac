@@ -1,0 +1,5 @@
+failed to encode the graph
+
+Caused by:
+    0: failed to merge the type definition for implicit import `b` due to conflicting types
+    1: cannot merge used type `t` as it is from another interface

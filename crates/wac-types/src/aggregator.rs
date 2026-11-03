@@ -105,6 +105,16 @@ impl TypeAggregator {
         // If it has already been remapped, do a merge; otherwise, remap it.
         if let Some(existing) = self.imports.get(name).copied() {
             self.merge_item_kind(existing, types, kind, checker)?;
+
+            // An unnamed interface is found by what it was remapped to, so
+            // later uses of this one find the import it merged into.
+            if let (ItemKind::Instance(existing), ItemKind::Instance(id)) = (existing, kind) {
+                if types[id].id.is_none() {
+                    self.remapped
+                        .entry(Type::Interface(id))
+                        .or_insert(Type::Interface(existing));
+                }
+            }
             return Ok(self);
         }
 
@@ -280,21 +290,16 @@ impl TypeAggregator {
     ) -> Result<()> {
         let source = &types[id];
         for (name, used) in &source.uses {
-            let used_interface = types[used.interface]
-                .id
-                .as_ref()
-                .context("used type has no interface identifier")?;
-
             // Validate any existing used type of the same name
             if let Some(existing) = self.types[existing].uses.get(name) {
-                let existing_interface = self.types[existing.interface]
-                    .id
-                    .as_ref()
-                    .context("used type has no interface identifier")?;
-
                 // The interface names must be on compatible semver tracks
-                if !are_semver_compatible(existing_interface, used_interface) {
-                    bail!("cannot merge used type `{name}` as it is expected to be from interface `{existing_interface}` but it is from interface `{used_interface}`");
+                if let (Some(existing_interface), Some(used_interface)) = (
+                    &self.types[existing.interface].id,
+                    &types[used.interface].id,
+                ) {
+                    if !are_semver_compatible(existing_interface, used_interface) {
+                        bail!("cannot merge used type `{name}` as it is expected to be from interface `{existing_interface}` but it is from interface `{used_interface}`");
+                    }
                 }
 
                 // The types must be exported with the same name
@@ -306,11 +311,12 @@ impl TypeAggregator {
             // Remap the used interface; this will handle merging if we've seen the interface before
             let remapped = self.remap_interface(types, used.interface, checker)?;
             match self.types[existing].uses.get(name) {
+                // Interfaces without a name are the same only if they are
+                // one remapped interface
                 Some(existing) => {
-                    assert_eq!(
-                        existing.interface, remapped,
-                        "expected a merge to have occurred"
-                    );
+                    if existing.interface != remapped {
+                        bail!("cannot merge used type `{name}` as it is from another interface");
+                    }
                 }
                 None => {
                     self.types[existing].uses.insert(
@@ -416,21 +422,16 @@ impl TypeAggregator {
     ) -> Result<()> {
         let source = &types[id];
         for (name, used) in &source.uses {
-            let used_interface = types[used.interface]
-                .id
-                .as_ref()
-                .context("used type has no interface identifier")?;
-
             // Validate any existing used type of the same name
             if let Some(existing) = self.types[existing].uses.get(name) {
-                let existing_interface = self.types[existing.interface]
-                    .id
-                    .as_ref()
-                    .context("used type has no interface identifier")?;
-
                 // The interface names must be on compatible semver tracks
-                if !are_semver_compatible(existing_interface, used_interface) {
-                    bail!("cannot merge used type `{name}` as it is expected to be from interface `{existing_interface}` but it is from interface `{used_interface}`");
+                if let (Some(existing_interface), Some(used_interface)) = (
+                    &self.types[existing.interface].id,
+                    &types[used.interface].id,
+                ) {
+                    if !are_semver_compatible(existing_interface, used_interface) {
+                        bail!("cannot merge used type `{name}` as it is expected to be from interface `{existing_interface}` but it is from interface `{used_interface}`");
+                    }
                 }
 
                 // The types must be exported with the same name
@@ -442,11 +443,12 @@ impl TypeAggregator {
             // Remap the used interface; this will handle merging if we've seen the interface before
             let remapped = self.remap_interface(types, used.interface, checker)?;
             match self.types[existing].uses.get(name) {
+                // Interfaces without a name are the same only if they are
+                // one remapped interface
                 Some(existing) => {
-                    assert_eq!(
-                        existing.interface, remapped,
-                        "expected a merge to have occurred"
-                    );
+                    if existing.interface != remapped {
+                        bail!("cannot merge used type `{name}` as it is from another interface");
+                    }
                 }
                 None => {
                     let prev = self.types[existing].uses.insert(
@@ -723,15 +725,13 @@ impl TypeAggregator {
                             self.remap_interface(types, id, checker)
                         })
                         .transpose()?;
-                    // If there is an owning interface, ensure it is imported
+                    // If there is a named owning interface, ensure it is
+                    // imported; an unnamed one is imported under its extern's name.
                     if let Some(owner) = owner {
-                        let name = self.types()[owner]
-                            .id
-                            .as_deref()
-                            .expect("interface has no id");
-                        if !self.imports.contains_key(name) {
+                        if let Some(name) = self.types[owner].id.clone() {
                             self.imports
-                                .insert(name.to_owned(), ItemKind::Instance(owner));
+                                .entry(name)
+                                .or_insert(ItemKind::Instance(owner));
                         }
                     }
                     Ok(ResourceAlias {
@@ -862,7 +862,16 @@ impl TypeAggregator {
         checker: &mut SubtypeChecker,
     ) -> Result<InterfaceId> {
         let interface = self.remap_interface_definition(types, id, checker)?;
-        Ok(self.types.add_interface(interface))
+        let remapped = self.types.add_interface(interface);
+
+        // An unnamed interface is only found by what it was remapped to, as
+        // a use of one of its types or an owner of one of its resources.
+        if types[id].id.is_none() {
+            self.remapped
+                .entry(Type::Interface(id))
+                .or_insert(Type::Interface(remapped));
+        }
+        Ok(remapped)
     }
 
     /// Remaps the used types and exports of an interface.
@@ -879,10 +888,6 @@ impl TypeAggregator {
                 .uses
                 .iter()
                 .map(|(n, u)| {
-                    if types[u.interface].id.is_none() {
-                        bail!("used type `{n}` is from an interface without an identifier");
-                    }
-
                     Ok((
                         n.clone(),
                         UsedType {
@@ -920,10 +925,6 @@ impl TypeAggregator {
                 .uses
                 .iter()
                 .map(|(n, u)| {
-                    if types[u.interface].id.is_none() {
-                        bail!("used type `{n}` is from an interface without an identifier");
-                    }
-
                     Ok((
                         n.clone(),
                         UsedType {

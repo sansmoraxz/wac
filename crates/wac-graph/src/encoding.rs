@@ -137,6 +137,14 @@ impl Default for Encodable {
     }
 }
 
+/// How an instance of an interface is found in a scope: by its name if it has
+/// one, as named interfaces merge, or else by the interface itself.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InterfaceKey {
+    Name(String),
+    Id(InterfaceId),
+}
+
 #[derive(Debug, Default)]
 pub struct Scope {
     /// The map from types to encoded type index.
@@ -159,14 +167,25 @@ pub struct Scope {
     /// resource they alias, to the instance's index and the export names
     /// leading from it to the resource.
     instance_resources: HashMap<ResourceId, (u32, Vec<String>)>,
-    /// The map of interface name and type export name to the index of the type
+    /// The map of interfaces to the index of an instance of them in this scope,
+    /// which is how an interface without a name is found.
+    interface_instances: HashMap<InterfaceId, u32>,
+    /// The map of interface and type export name to the index of the type
     /// aliased from an instance of the interface in this or an enclosing scope.
-    used_types: HashMap<(String, String), u32>,
+    used_types: HashMap<(InterfaceKey, String), u32>,
     /// The encodable for this scope.
     encodable: Encodable,
 }
 
 impl Scope {
+    /// Gets the index of an instance of an interface in this scope.
+    fn instance(&self, key: &InterfaceKey) -> Option<u32> {
+        match key {
+            InterfaceKey::Name(name) => self.instances.get(name).copied(),
+            InterfaceKey::Id(id) => self.interface_instances.get(id).copied(),
+        }
+    }
+
     /// Aliases the type export `name` of the instance at index `instance`,
     /// reusing the alias if this scope already has one.
     fn alias_type_export(&mut self, instance: u32, name: &str) -> u32 {
@@ -278,11 +297,11 @@ impl State {
     }
 
     /// Gets how many scopes out from the current one the nearest instance of
-    /// the interface `iid` is.
-    fn instance_depth(&self, iid: &str) -> Option<usize> {
+    /// an interface is.
+    fn interface_depth(&self, key: &InterfaceKey) -> Option<usize> {
         std::iter::once(&self.current)
             .chain(self.scopes.iter().rev())
-            .position(|scope| scope.instances.contains_key(iid))
+            .position(|scope| scope.instance(key).is_some())
     }
 
     /// Gets how many scopes out from the current one the nearest scope that
@@ -294,23 +313,24 @@ impl State {
             .expect("the outermost scope is a component")
     }
 
-    /// Aliases the type export `name` of the nearest instance of the interface
-    /// `iid` into the current scope, through an outer alias if the instance is
-    /// in an enclosing scope.
-    fn alias_used_type(&mut self, iid: &str, name: &str) -> u32 {
-        let key = (iid.to_string(), name.to_string());
+    /// Aliases the type export `name` of the nearest instance of an interface
+    /// into the current scope, through an outer alias if the instance is in an
+    /// enclosing scope.
+    ///
+    /// Returns `None` if no scope has an instance of the interface.
+    fn alias_used_type(&mut self, interface: InterfaceKey, name: &str) -> Option<u32> {
+        let key = (interface, name.to_string());
         if let Some(index) = self.current.used_types.get(&key) {
-            return *index;
+            return Some(*index);
         }
 
-        let depth = self
-            .instance_depth(iid)
-            .expect("a used interface should have an instance");
+        let depth = self.interface_depth(&key.0)?;
         let scope = self.scope_mut(depth);
-        let index = scope.alias_type_export(scope.instances[iid], name);
+        let instance = scope.instance(&key.0).expect("the scope has the instance");
+        let index = scope.alias_type_export(instance, name);
         let index = self.alias_outer_type(depth, index);
         self.current.used_types.insert(key, index);
-        index
+        Some(index)
     }
 
     /// Aliases the type at `index` of the scope `depth` scopes out into the
@@ -480,19 +500,41 @@ impl<'a> TypeEncoder<'a> {
         state: &mut State,
         uses: &'a IndexMap<String, UsedType>,
         items: &'a IndexMap<String, ItemKind>,
-    ) {
+    ) -> Result<(), EncodeError> {
         state.current.type_aliases.clear();
 
         for (name, used) in uses {
             let interface = &self.0[used.interface];
-            let iid = interface.id.as_ref().expect("interface should have an id");
             let export: &String = used.name.as_ref().unwrap_or(name);
             let kind = interface.exports.get(export).unwrap();
-            let index = state.alias_used_type(iid, export);
+            let key = match &interface.id {
+                Some(iid) => InterfaceKey::Name(iid.clone()),
+                None => InterfaceKey::Id(used.interface),
+            };
+            let Some(index) = state.alias_used_type(key, export) else {
+                assert!(
+                    interface.id.is_none(),
+                    "a named interface is imported before its types are used"
+                );
+
+                // An interface without a name that no scope has an instance
+                // of cannot be imported. A value type is encoded in place, as
+                // it is equal to any of the same structure; a resource is not.
+                if let ItemKind::Type(Type::Resource(_)) = kind {
+                    return Err(EncodeError::UnsupportedType {
+                        message: format!(
+                            "a use of resource `{export}` from an interface without a name \
+                             that is not imported"
+                        ),
+                    });
+                }
+                continue;
+            };
 
             log::debug!(
-                "aliased {kind} export `{export}` of interface `{iid}` to type index {index}",
-                kind = kind.desc(self.0)
+                "aliased {kind} export `{export}` of interface {interface} to type index {index}",
+                kind = kind.desc(self.0),
+                interface = interface.id.as_deref().unwrap_or("without a name"),
             );
 
             state.current.type_aliases.insert(name.clone(), index);
@@ -508,6 +550,8 @@ impl<'a> TypeEncoder<'a> {
                 state.current.type_indexes.insert(*ty, index);
             }
         }
+
+        Ok(())
     }
 
     fn instance(
@@ -523,7 +567,7 @@ impl<'a> TypeEncoder<'a> {
         }
 
         // Encode any required aliases
-        self.use_aliases(state, &interface.uses, &interface.exports);
+        self.use_aliases(state, &interface.uses, &interface.exports)?;
         state.push(Encodable::Instance(InstanceType::default()));
 
         // Otherwise, export all exports
@@ -601,7 +645,7 @@ impl<'a> TypeEncoder<'a> {
             self.import_deps(state, used.interface)?;
         }
 
-        self.use_aliases(state, &world.uses, &world.imports);
+        self.use_aliases(state, &world.uses, &world.imports)?;
 
         for (name, kind) in &world.imports {
             self.import(state, name, *kind)?;
@@ -623,7 +667,12 @@ impl<'a> TypeEncoder<'a> {
     }
 
     fn import_deps(&self, state: &mut State, id: InterfaceId) -> Result<(), EncodeError> {
-        let iid = self.0[id].id.as_ref().expect("interface should have an id");
+        // An interface without a name can't be imported, so it is used from
+        // the scope that has it.
+        let Some(iid) = self.0[id].id.as_ref() else {
+            return Ok(());
+        };
+        let key = InterfaceKey::Name(iid.clone());
         if state.current.instances.contains_key(iid) {
             return Ok(());
         }
@@ -631,7 +680,7 @@ impl<'a> TypeEncoder<'a> {
         // An instance type has no imports, so it uses the interface from an
         // enclosing scope, which imports it if none has it yet.
         if matches!(state.current.encodable, Encodable::Instance(_)) {
-            if state.instance_depth(iid).is_some() {
+            if state.interface_depth(&key).is_some() {
                 return Ok(());
             }
 
@@ -939,6 +988,7 @@ impl<'a> TypeEncoder<'a> {
     /// Records the resources the instance at `index` of the current scope
     /// exports, directly or through instances it exports.
     pub fn record_instance(&self, state: &mut State, index: u32, id: InterfaceId) {
+        state.current.interface_instances.entry(id).or_insert(index);
         self.record_instance_exports(state, index, id, &mut Vec::new());
     }
 
@@ -1143,10 +1193,14 @@ impl<'a> TypeEncoder<'a> {
                 // This should only occur for resources owned by interfaces
                 let source_index = state.current.encodable.type_count();
                 let owner = alias.owner.expect("resource should have an owner");
-                let iid = self.0[owner]
-                    .id
-                    .as_deref()
-                    .expect("expected an interface with an id");
+                let Some(iid) = self.0[owner].id.as_deref() else {
+                    return Err(EncodeError::UnsupportedType {
+                        message: format!(
+                            "an import of resource `{name}` from an interface without a name \
+                             that is not imported"
+                        ),
+                    });
+                };
                 state.current.encodable.alias(Alias::InstanceExport {
                     instance: state.current.instances[iid],
                     kind: ComponentExportKind::Type,

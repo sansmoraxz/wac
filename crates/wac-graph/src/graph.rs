@@ -2154,4 +2154,64 @@ mod test {
             "cannot encode a use of resource `r` from outside of its scope"
         );
     }
+
+    /// Imports only `bar` of a component whose `bar` uses the type `t` of its
+    /// import `foo`, an instance of an interface without a name declaring `t`
+    /// with `t`.
+    fn import_bar_using_unnamed_interface(t: &str) -> CompositionGraph {
+        let mut graph = CompositionGraph::new();
+        let bytes = wat::parse_str(format!(
+            r#"(component $c
+                (type (instance {t}))
+                (import "foo" (instance $i (type 0)))
+                (alias export $i "t" (type $t))
+                (type (instance
+                    (alias outer $c $t (type))
+                    (export "t" (type (eq 0)))
+                ))
+                (import "bar" (instance (type 2)))
+            )"#
+        ))
+        .unwrap();
+
+        let package =
+            wac_types::Package::from_bytes("test:pkg", None, bytes, graph.types_mut()).unwrap();
+        let pkg_id = graph.register_package(package).unwrap();
+        let kind = graph.types()[graph[pkg_id].ty()].imports["bar"];
+        graph.import("bar", kind).unwrap();
+        graph
+    }
+
+    #[test]
+    fn it_encodes_an_explicit_import_using_a_value_type_of_an_unnamed_interface() {
+        let graph = import_bar_using_unnamed_interface(
+            r#"(type (record (field "f" u32))) (export "t" (type (eq 0)))"#,
+        );
+        let bytes = graph
+            .encode(EncodeOptions {
+                validate: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let text = wasmprinter::print_bytes(bytes).unwrap();
+        assert!(
+            text.contains(r#"(export (;1;) "t" (type (eq 0)))"#),
+            "`t` should be defined in place: {text}"
+        );
+    }
+
+    #[test]
+    fn it_errors_on_an_explicit_import_using_a_resource_of_an_unnamed_interface() {
+        let graph = import_bar_using_unnamed_interface(r#"(export "t" (type (sub resource)))"#);
+        let err = graph.encode(EncodeOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::UnsupportedType { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "cannot encode a use of resource `t` from an interface without a name that is not \
+             imported"
+        );
+    }
 }
