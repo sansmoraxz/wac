@@ -844,8 +844,12 @@ impl TypeAggregator {
         self.types[remapped] = self.remap_interface_definition(types, id, checker)?;
 
         if let Some(name) = self.types[remapped].id.as_ref() {
+            // Remapping the interface can have remapped another of one name,
+            // such as an instance of that name inside it.
             let prev = self.interfaces.insert(name.clone(), remapped);
-            assert!(prev.is_none());
+            if prev.is_some() {
+                bail!("interface `{name}` holds another interface of the same name");
+            }
         }
 
         Ok(remapped)

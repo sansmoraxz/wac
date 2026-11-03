@@ -1,0 +1,5 @@
+failed to encode the graph
+
+Caused by:
+    0: failed to merge the type definition for implicit import `a:b/c` due to conflicting types
+    1: interface `a:b/c` holds another interface of the same name
