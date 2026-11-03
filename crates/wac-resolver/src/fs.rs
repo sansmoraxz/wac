@@ -103,7 +103,7 @@ impl FileSystemPackageResolver {
                 if let Some(pkg) = pkg {
                     packages.insert(
                         *key,
-                        wit_component::encode(&resolve, pkg)
+                        wit_component::encode(&resolve, pkg, false)
                             .with_context(|| {
                                 format!(
                                     "failed to encode WIT package from `{path}`",

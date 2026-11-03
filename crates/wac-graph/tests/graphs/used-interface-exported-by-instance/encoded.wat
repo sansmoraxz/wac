@@ -19,31 +19,28 @@
     )
   )
   (import "x:y/z" (instance (;0;) (type 0)))
-  (type (;1;)
-    (component
-      (type (;0;)
-        (instance
-          (type (;0;)
-            (instance
-              (type (;0;) (record (field "x" u32)))
-              (export (;1;) "t" (type (eq 0)))
-            )
+  (component (;0;)
+    (type (;0;)
+      (instance
+        (type (;0;)
+          (instance
+            (type (;0;) (record (field "x" u32)))
+            (export (;1;) "t" (type (eq 0)))
           )
-          (export (;0;) "a:b/c" (instance (type 0)))
-          (alias export 0 "t" (type (;1;)))
-          (type (;2;)
-            (instance
-              (alias outer 1 1 (type (;0;)))
-              (export (;1;) "t" (type (eq 0)))
-            )
-          )
-          (export (;1;) "a:b/d" (instance (type 2)))
         )
+        (export (;0;) "a:b/c" (instance (type 0)))
+        (alias export 0 "t" (type (;1;)))
+        (type (;2;)
+          (instance
+            (alias outer 1 1 (type (;0;)))
+            (export (;1;) "t" (type (eq 0)))
+          )
+        )
+        (export (;1;) "a:b/d" (instance (type 2)))
       )
-      (import "x:y/z" (instance (;0;) (type 0)))
     )
+    (import "x:y/z" (instance (;0;) (type 0)))
   )
-  (import "unlocked-dep=<test:foo>" (component (;0;) (type 1)))
   (instance (;1;) (instantiate 0
       (with "x:y/z" (instance 0))
     )

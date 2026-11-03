@@ -1,0 +1,6 @@
+failed to encode the graph
+
+Caused by:
+    0: encoding produced a component that failed validation
+    1: type mismatch for import `x`
+       resource types are not the same

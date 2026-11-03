@@ -97,7 +97,7 @@ fn encode_wit_as_component(path: &Path) -> anyhow::Result<Vec<u8>> {
     } else {
         resolve.push_path(path)?.0
     };
-    let encoded = wit_component::encode(&resolve, pkg).with_context(|| {
+    let encoded = wit_component::encode(&resolve, pkg, false).with_context(|| {
         format!(
             "failed to encode WIT package from `{path}`",
             path = path.display()

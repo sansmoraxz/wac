@@ -101,10 +101,7 @@ fn run_test(test: &Path, ntests: &AtomicUsize) -> Result<()> {
             .map_err(|e| fmt_err(e, test, &source))?;
 
         resolution
-            .encode(EncodeOptions {
-                define_components: false,
-                ..Default::default()
-            })
+            .encode(EncodeOptions::default())
             .map_err(|e| fmt_err(e, test, &source))
     };
 

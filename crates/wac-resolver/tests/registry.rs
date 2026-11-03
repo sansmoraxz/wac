@@ -65,10 +65,7 @@ export i2.foo as "bar";
     let packages = resolver.resolve(&packages(&document)?).await?;
 
     let resolution = document.resolve(packages)?;
-    let bytes = resolution.encode(EncodeOptions {
-        define_components: false,
-        ..Default::default()
-    })?;
+    let bytes = resolution.encode(EncodeOptions::default())?;
 
     assert_eq!(
         wasmprinter::print_bytes(bytes)?,
@@ -87,19 +84,16 @@ export i2.foo as "bar";
     )
   )
   (import "y" (instance $y (;1;) (type 1)))
-  (type (;2;)
-    (component
-      (type (;0;)
-        (instance
-          (type (;0;) (func))
-          (export (;0;) "bar" (func (type 0)))
-        )
+  (component (;0;)
+    (type (;0;)
+      (instance
+        (type (;0;) (func))
+        (export (;0;) "bar" (func (type 0)))
       )
-      (import "test:wit/foo" (instance (;0;) (type 0)))
-      (export (;1;) "test:wit/foo" (instance (type 0)))
     )
+    (import "test:wit/foo" (instance (;0;) (type 0)))
+    (export (;1;) "test:wit/foo" (instance 0))
   )
-  (import "unlocked-dep=<test:comp>" (component (;0;) (type 2)))
   (instance $i1 (;2;) (instantiate 0
       (with "test:wit/foo" (instance $x))
     )

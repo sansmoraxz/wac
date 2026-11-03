@@ -1,7 +1,7 @@
 failed to resolve document
 
   × export name `url=<https://example.com/foo>` is not valid
-  ╰─▶ export name cannot be a hash, url, or dependency
+  ╰─▶ expected `:` at `=<https://example.com/foo>`
    ╭─[tests/resolution/fail/export-url-name.wac:4:13]
  3 │ import f: func();
  4 │ export f as "url=<https://example.com/foo>";

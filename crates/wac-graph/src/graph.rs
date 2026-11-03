@@ -23,10 +23,7 @@ use wasm_encoder::{
     Alias, ComponentBuilder, ComponentExportKind, ComponentExternName, ComponentNameSection,
     ComponentTypeRef, ComponentValType, NameMap, TypeBounds,
 };
-use wasmparser::{
-    names::{ComponentName, ComponentNameKind},
-    BinaryReaderError, Validator, WasmFeatures,
-};
+use wasmparser::{names::ComponentName, BinaryReaderError, Validator, WasmFeatures};
 
 /// Represents an error that can occur when defining a type in
 /// a composition graph.
@@ -953,17 +950,7 @@ impl CompositionGraph {
         };
 
         // Ensure that the given export name is a valid extern name
-        match ComponentName::new(&name, 0).map_err(map_reader_err)?.kind() {
-            ComponentNameKind::Hash(_)
-            | ComponentNameKind::Url(_)
-            | ComponentNameKind::Dependency(_) => {
-                return Err(ExportError::InvalidExportName {
-                    name: name.to_string(),
-                    source: anyhow::anyhow!("export name cannot be a hash, url, or dependency"),
-                });
-            }
-            _ => {}
-        };
+        ComponentName::new(&name, 0).map_err(map_reader_err)?;
 
         log::debug!("exporting node {index} as `{name}`", index = node.0.index());
         self.graph[node.0].export = Some(name.clone());

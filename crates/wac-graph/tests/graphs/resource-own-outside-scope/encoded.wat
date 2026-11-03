@@ -14,26 +14,23 @@
     )
   )
   (import "a" (instance (;0;) (type 0)))
-  (type (;1;)
-    (component
-      (type (;0;)
-        (instance
-          (type (;0;)
-            (instance
-              (export (;0;) "r" (type (sub resource)))
-            )
+  (component (;0;)
+    (type (;0;)
+      (instance
+        (type (;0;)
+          (instance
+            (export (;0;) "r" (type (sub resource)))
           )
-          (export (;0;) "i" (instance (type 0)))
-          (alias export 0 "r" (type (;1;)))
-          (type (;2;) (own 1))
-          (type (;3;) (func (param "x" 2)))
-          (export (;0;) "f" (func (type 3)))
         )
+        (export (;0;) "i" (instance (type 0)))
+        (alias export 0 "r" (type (;1;)))
+        (type (;2;) (own 1))
+        (type (;3;) (func (param "x" 2)))
+        (export (;0;) "f" (func (type 3)))
       )
-      (import "a" (instance (;0;) (type 0)))
     )
+    (import "a" (instance (;0;) (type 0)))
   )
-  (import "unlocked-dep=<test:foo>" (component (;0;) (type 1)))
   (instance (;1;) (instantiate 0
       (with "a" (instance 0))
     )

@@ -13,25 +13,22 @@
     )
   )
   (import "a:b/c" (component (;0;) (type 2)))
-  (type (;3;)
-    (component
-      (type (;0;)
-        (instance
-          (export (;0;) "r" (type (sub resource)))
-        )
+  (component (;1;)
+    (type (;0;)
+      (instance
+        (export (;0;) "r" (type (sub resource)))
       )
-      (import "z" (implements "a:b/c") (instance (;0;) (type 0)))
-      (alias export 0 "r" (type (;1;)))
-      (type (;2;)
-        (component
-          (alias outer 1 1 (type (;0;)))
-          (import "x" (type (;1;) (eq 0)))
-        )
-      )
-      (import "a:b/c" (component (;0;) (type 2)))
     )
+    (import "z" (implements "a:b/c") (instance $z (;0;) (type 0)))
+    (alias export $z "r" (type $r (;1;)))
+    (type (;2;)
+      (component
+        (alias outer 1 $r (type (;0;)))
+        (import "x" (type (;1;) (eq 0)))
+      )
+    )
+    (import "a:b/c" (component (;0;) (type 2)))
   )
-  (import "unlocked-dep=<test:foo>" (component (;1;) (type 3)))
   (instance (;1;) (instantiate 1
       (with "z" (instance 0))
       (with "a:b/c" (component 0))

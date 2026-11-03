@@ -146,6 +146,7 @@ impl GraphFile {
             &resolve,
             world,
             StringEncoding::default(),
+            false,
         )
         .with_context(|| {
             format!(
@@ -343,10 +344,6 @@ fn encoding() -> Result<()> {
                 println!("{:?}", graph);
                 graph
                     .encode(EncodeOptions {
-                        // We import the component definitions instead
-                        // of defining them inline to make the encoded wat
-                        // more readable and to test encoding a bit more.
-                        define_components: false,
                         validate: true,
                         ..Default::default()
                     })
@@ -356,7 +353,15 @@ fn encoding() -> Result<()> {
         let (output, baseline_path) = if error_path.is_file() {
             match r {
                 Ok(_) => bail!("expected a test failure for test case `{test_case}`"),
-                Err(e) => (format!("{e:?}\n").replace('\\', "/"), &error_path),
+                Err(e) => {
+                    // A resource's id in the error differs from run to run.
+                    let error = format!("{e:?}\n").replace('\\', "/");
+                    let error = match error.split_once(" (ResourceId") {
+                        Some((error, _)) => format!("{error}\n"),
+                        None => error,
+                    };
+                    (error, &error_path)
+                }
             }
         } else {
             let bytes =
@@ -550,49 +555,29 @@ fn reexport_preserves_source_implements_metadata() -> Result<()> {
         graph.export(alias, name)?;
     }
 
-    for define_components in [true, false] {
-        let bytes = graph.encode(EncodeOptions {
-            define_components,
-            ..Default::default()
-        })?;
-        let types = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
-            .validate_all(&bytes)?;
-        assert_eq!(
-            types.component_item_for_export("plain").unwrap().implements,
-            None
-        );
-        assert_eq!(
-            types
-                .component_item_for_export("annotated")
-                .unwrap()
-                .implements
-                .as_deref(),
-            Some("test:test/logger")
-        );
+    let bytes = graph.encode(EncodeOptions::default())?;
+    let types = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&bytes)?;
+    assert_eq!(
+        types.component_item_for_export("plain").unwrap().implements,
+        None
+    );
+    assert_eq!(
+        types
+            .component_item_for_export("annotated")
+            .unwrap()
+            .implements
+            .as_deref(),
+        Some("test:test/logger")
+    );
 
-        if define_components {
-            let DecodedWasm::Component(resolve, world) = wit_parser::decoding::decode(&bytes)?
-            else {
-                bail!("expected a component");
-            };
-            assert_eq!(
-                labelled_externs(&resolve, &resolve.worlds[world].exports),
-                ["plain: _ [log]", "annotated: test:test/logger [log]"]
-            );
-        } else {
-            let import = types
-                .component_item_for_import("unlocked-dep=<test:producer>")
-                .unwrap();
-            let wasmparser::component_types::ComponentEntityType::Component(id) = import.ty else {
-                bail!("expected a component import");
-            };
-            assert_eq!(types[id].exports["plain"].implements, None);
-            assert_eq!(
-                types[id].exports["annotated"].implements.as_deref(),
-                Some("test:test/logger")
-            );
-        }
-    }
+    let DecodedWasm::Component(resolve, world) = wit_parser::decoding::decode(&bytes)? else {
+        bail!("expected a component");
+    };
+    assert_eq!(
+        labelled_externs(&resolve, &resolve.worlds[world].exports),
+        ["plain: _ [log]", "annotated: test:test/logger [log]"]
+    );
 
     Ok(())
 }

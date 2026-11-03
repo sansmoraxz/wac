@@ -218,10 +218,10 @@ pub fn are_semver_compatible(a: &str, b: &str) -> bool {
 /// the `primary` of `(import "primary" (implements "a:b/c") ...)`, rather
 /// than an interface name or another kind of name.
 pub fn is_label(name: &str) -> bool {
-    matches!(
-        ComponentName::new(name, 0).as_ref().map(|n| n.kind()),
-        Ok(ComponentNameKind::Label(_))
-    )
+    match ComponentName::new(name, 0).as_ref().map(|n| n.kind()) {
+        Ok(ComponentNameKind::Plain(plain)) => plain.is_bare(),
+        _ => false,
+    }
 }
 
 pub(crate) fn alternate_lookup_key(name: &str) -> Option<(&str, Version)> {

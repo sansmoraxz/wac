@@ -99,7 +99,7 @@ impl TargetValidationReport {
 ///
 /// let mut resolve = wit_parser::Resolve::new();
 /// let pkg = resolve.push_dir(path_to_wit_dir)?.0;
-/// let wit_bytes = wit_component::encode(&resolve, pkg)?;
+/// let wit_bytes = wit_component::encode(&resolve, pkg, false)?;
 /// let wit = Package::from_bytes("wit", None, wit_bytes, &mut types)?;
 ///
 /// let component_bytes = std::fs::read(path_to_component)?;  

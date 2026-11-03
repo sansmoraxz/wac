@@ -24,14 +24,11 @@
   (import "baz" (func (;0;) (type 3)))
   (type (;4;) (func))
   (import "f" (func $f (;1;) (type 4)))
-  (type (;5;)
-    (component
-      (type (;0;) (func))
-      (import "baz" (func (;0;) (type 0)))
-      (export (;1;) "foo" (func (type 0)))
-    )
+  (component (;0;)
+    (type (;0;) (func))
+    (import "baz" (func (;0;) (type 0)))
+    (export (;1;) "foo" (func 0))
   )
-  (import "unlocked-dep=<foo:bar>" (component (;0;) (type 5)))
   (instance $x1 (;3;) (instantiate 0
       (with "baz" (func 0))
     )
@@ -49,18 +46,15 @@
       (with "baz" (func 2))
     )
   )
-  (type (;6;)
-    (component
-      (type (;0;)
-        (instance
-          (type (;0;) (func))
-          (export (;0;) "foo" (func (type 0)))
-        )
+  (component (;1;)
+    (type (;0;)
+      (instance
+        (type (;0;) (func))
+        (export (;0;) "foo" (func (type 0)))
       )
-      (import "foo" (instance (;0;) (type 0)))
     )
+    (import "foo" (instance (;0;) (type 0)))
   )
-  (import "unlocked-dep=<bar:baz>" (component (;1;) (type 6)))
   (instance $y1 (;7;) (instantiate 1
       (with "foo" (instance 0))
     )
