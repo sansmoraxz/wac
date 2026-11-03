@@ -1,0 +1,49 @@
+(component
+  (type (;0;)
+    (component
+      (core type (;0;)
+        (module
+          (export "memory" (memory 1))
+        )
+      )
+      (import "m" (core module (;0;) (type 0)))
+      (type (;0;)
+        (component
+          (type (;0;) (func))
+          (export (;0;) "f" (func (type 0)))
+        )
+      )
+      (import "c" (component (;0;) (type 0)))
+      (export (;0;) "v" (value string))
+    )
+  )
+  (import "c" (component (;0;) (type 0)))
+  (type (;1;)
+    (component
+      (type (;0;)
+        (component
+          (core type (;0;)
+            (module
+              (export "memory" (memory 1))
+            )
+          )
+          (import "m" (core module (;0;) (type 0)))
+          (type (;0;)
+            (component
+              (type (;0;) (func))
+              (export (;0;) "f" (func (type 0)))
+            )
+          )
+          (import "c" (component (;0;) (type 0)))
+          (export (;0;) "v" (value string))
+        )
+      )
+      (import "c" (component (;0;) (type 0)))
+    )
+  )
+  (import "unlocked-dep=<test:foo>" (component (;1;) (type 1)))
+  (instance (;0;) (instantiate 1
+      (with "c" (component 0))
+    )
+  )
+)

@@ -807,6 +807,15 @@ impl<'a> TypeEncoder<'a> {
 
         log::debug!("encoding {kind} import `{name}`", kind = kind.desc(self.0));
         let ty = kind.ty();
+        if let ItemKind::Value(ty) = kind {
+            let ty = self.value_type(state, ty);
+            state
+                .current
+                .encodable
+                .import_type(name, ComponentTypeRef::Value(ty));
+            return;
+        }
+
         let index = self.extern_ty(state, name, kind, true);
 
         match kind {
@@ -848,7 +857,19 @@ impl<'a> TypeEncoder<'a> {
                     }
                 }
             }
-            _ => panic!("expected only types, functions, and instance types"),
+            ItemKind::Component(_) => {
+                state
+                    .current
+                    .encodable
+                    .import_type(name, ComponentTypeRef::Component(index));
+            }
+            ItemKind::Module(_) => {
+                state
+                    .current
+                    .encodable
+                    .import_type(name, ComponentTypeRef::Module(index));
+            }
+            ItemKind::Value(_) => unreachable!("values are imported above"),
         }
     }
 
@@ -934,6 +955,11 @@ impl<'a> TypeEncoder<'a> {
             kind = kind.desc(self.0)
         );
 
+        if let ItemKind::Value(ty) = kind {
+            let ty = self.value_type(state, ty);
+            return Self::export_type(state, name, ComponentTypeRef::Value(ty));
+        }
+
         let index = self.extern_ty(state, name, kind, true);
         // Preserve the `(implements "I")` directive when re-encoding an
         // instance export that uses a plain-name label.
@@ -951,7 +977,9 @@ impl<'a> TypeEncoder<'a> {
                 ItemKind::Type(_) => ComponentTypeRef::Type(TypeBounds::Eq(index)),
                 ItemKind::Func(_) => ComponentTypeRef::Func(index),
                 ItemKind::Instance(_) => ComponentTypeRef::Instance(index),
-                _ => panic!("expected only types, functions, and instance types"),
+                ItemKind::Component(_) => ComponentTypeRef::Component(index),
+                ItemKind::Module(_) => ComponentTypeRef::Module(index),
+                ItemKind::Value(_) => unreachable!("values are exported above"),
             },
         );
 
