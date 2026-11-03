@@ -146,8 +146,10 @@ impl TypeAggregator {
         }
 
         let remapped = self.remap_extern(name, types, kind, checker)?;
-        let prev = self.imports.insert(name.to_string(), remapped);
-        assert!(prev.is_none());
+        // Remapping an alias of a resource imports the interface owning it.
+        if self.imports.insert(name.to_string(), remapped).is_some() {
+            bail!("import `{name}` has the name of an interface owning a resource it uses");
+        }
         Ok(self)
     }
 
