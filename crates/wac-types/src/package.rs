@@ -845,7 +845,7 @@ impl<'a> TypeConverter<'a> {
             wasmparser::types::EntityType::Global(ty) => ty.try_into()?,
             wasmparser::types::EntityType::Tag(ty) => CoreExtern::Tag(self.func_type(ty)?),
             wasmparser::types::EntityType::FuncExact(_) => {
-                todo!("wasmparser::types::EntityType::FuncExact")
+                bail!("exact function imports are not yet supported")
             }
         })
     }
