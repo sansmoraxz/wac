@@ -261,6 +261,8 @@ pub struct State {
     pub packages: HashMap<PackageId, u32>,
     /// A map of instantiation nodes to a list of their encoded implicitly imported arguments.
     pub implicit_args: HashMap<NodeIndex, Vec<(String, ComponentExportKind, u32)>>,
+    /// The interfaces whose dependencies are being imported.
+    importing: Vec<InterfaceId>,
 }
 
 impl State {
@@ -721,9 +723,17 @@ impl<'a> TypeEncoder<'a> {
             return result;
         }
 
+        // Merging packages can make interfaces use each other.
+        if state.importing.contains(&id) {
+            return Err(EncodeError::UnsupportedType {
+                message: format!("interface `{iid}` as it uses itself through another interface"),
+            });
+        }
+
         let interface = &self.0[id];
 
         // Depth-first recurse on the dependencies of this interface
+        state.importing.push(id);
         for used in interface.uses.values() {
             self.import_deps(state, used.interface)?;
         }
@@ -742,6 +752,7 @@ impl<'a> TypeEncoder<'a> {
             "interface `{iid}` is available for aliasing from instance index {import_index}"
         );
         state.current.instances.insert(iid.clone(), import_index);
+        state.importing.pop();
         Ok(())
     }
 

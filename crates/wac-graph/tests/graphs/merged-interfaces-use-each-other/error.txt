@@ -1,0 +1,4 @@
+failed to encode the graph
+
+Caused by:
+    cannot encode interface `a:b/y` as it uses itself through another interface
