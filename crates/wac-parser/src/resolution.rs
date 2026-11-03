@@ -476,6 +476,18 @@ pub enum Error {
         #[source]
         source: anyhow::Error,
     },
+    /// An explicit import's type could not be merged.
+    #[error("failed to merge the type definition for import `{name}`")]
+    ImportMergeFailure {
+        /// The name of the import.
+        name: String,
+        /// The span of the import.
+        #[label(primary, "import here")]
+        span: SourceSpan,
+        /// The underlying merge error.
+        #[source]
+        source: anyhow::Error,
+    },
     /// An operation was performed on something that was not an instance.
     #[error("an instance is required to perform {operation}")]
     NotAnInstance {
@@ -708,6 +720,15 @@ impl Resolution<'_> {
                 name: import,
                 span: self.instantiation_spans[&second],
                 instantiation: self.instantiation_spans[&first],
+                source,
+            },
+            EncodeError::ExplicitImportTypeMergeConflict {
+                import,
+                node,
+                source,
+            } => Error::ImportMergeFailure {
+                name: import,
+                span: self.import_spans[&node],
                 source,
             },
         })

@@ -224,6 +224,17 @@ pub enum EncodeError {
         #[source]
         source: anyhow::Error,
     },
+    /// An error occurred while merging an explicit import type.
+    #[error("failed to merge the type definition for import `{import}`")]
+    ExplicitImportTypeMergeConflict {
+        /// The name of the import.
+        import: String,
+        /// The import node.
+        node: NodeId,
+        /// The type merge error.
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 /// Represents an error that can occur when decoding a composition graph.
@@ -1659,7 +1670,11 @@ impl<'a> CompositionGraphEncoder<'a> {
                 explicit_imports.insert(name.as_str(), n);
                 aggregator = aggregator
                     .aggregate(name, self.0.types(), node.item_kind, &mut checker)
-                    .unwrap();
+                    .map_err(|e| EncodeError::ExplicitImportTypeMergeConflict {
+                        import: name.clone(),
+                        node: NodeId(n),
+                        source: e,
+                    })?;
             }
         }
         Ok(aggregator)
@@ -2064,5 +2079,30 @@ mod test {
             graph.get_export("g").is_none(),
             "exports should be cleaned up after unregister_package"
         );
+    }
+
+    #[test]
+    fn it_errors_on_an_explicit_import_conflicting_with_an_implicit_one() {
+        let mut graph = CompositionGraph::new();
+        let foo = wat::parse_str(
+            r#"(component (import "a:b/c@1.0.0" (instance (export "f" (func (param "x" u32))))))"#,
+        )
+        .unwrap();
+        let bar = wat::parse_str(
+            r#"(component (import "a:b/c@1.0.1" (instance (export "f" (func (param "x" string))))))"#,
+        )
+        .unwrap();
+        let foo = wac_types::Package::from_bytes("test:foo", None, foo, graph.types_mut()).unwrap();
+        let bar = wac_types::Package::from_bytes("test:bar", None, bar, graph.types_mut()).unwrap();
+        let foo = graph.register_package(foo).unwrap();
+        let bar = graph.register_package(bar).unwrap();
+        graph.instantiate(foo);
+        let kind = graph.types()[graph[bar].ty()].imports["a:b/c@1.0.1"];
+        graph.import("a:b/c@1.0.1", kind).unwrap();
+
+        assert!(matches!(
+            graph.encode(EncodeOptions::default()).unwrap_err(),
+            EncodeError::ExplicitImportTypeMergeConflict { .. }
+        ));
     }
 }
