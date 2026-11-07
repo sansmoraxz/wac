@@ -235,6 +235,12 @@ pub enum EncodeError {
         #[source]
         source: anyhow::Error,
     },
+    /// The graph imports a type that cannot be encoded.
+    #[error("cannot encode {message}")]
+    UnsupportedType {
+        /// What cannot be encoded.
+        message: String,
+    },
 }
 
 /// Represents an error that can occur when decoding a composition graph.
@@ -1446,8 +1452,8 @@ impl<'a> CompositionGraphEncoder<'a> {
         for n in other_nodes {
             let node = &self.0.graph[n];
             let index = match &node.kind {
-                NodeKind::Definition => self.definition(&mut state, node),
-                NodeKind::Instantiation(_) => self.instantiation(&mut state, n, node, options),
+                NodeKind::Definition => self.definition(&mut state, node)?,
+                NodeKind::Instantiation(_) => self.instantiation(&mut state, n, node, options)?,
                 NodeKind::Alias => self.alias(&mut state, n),
                 // `other_nodes` does not contain any import nodes
                 NodeKind::Import(_) => unreachable!(),
@@ -1572,14 +1578,20 @@ impl<'a> CompositionGraphEncoder<'a> {
 
         let mut encoded = HashMap::new();
 
-        // Instances first, so a later type import can alias a type from an
-        // instance export instead of re-encoding it as a local definition.
-        let (instances, rest): (Vec<_>, Vec<_>) = aggregator
-            .imports()
+        // Resources of their own first, as they depend on nothing and instance
+        // types may use them. Then instances, so a later type import can alias
+        // a type from an instance export instead of re-encoding it as a local
+        // definition.
+        let types = aggregator.types();
+        let (resources, rest): (Vec<_>, Vec<_>) = aggregator.imports().partition(|(_, kind)| {
+            matches!(kind, ItemKind::Type(Type::Resource(id)) if types[*id].alias.is_none())
+        });
+        let (instances, rest): (Vec<_>, Vec<_>) = rest
+            .into_iter()
             .partition(|(_, kind)| matches!(kind, ItemKind::Instance(_)));
-        for (name, kind) in instances.into_iter().chain(rest) {
+        for (name, kind) in resources.into_iter().chain(instances).chain(rest) {
             log::debug!("import `{name}` is being imported");
-            let index = self.import(state, name, aggregator.types(), kind);
+            let index = self.import(state, name, aggregator.types(), kind)?;
             encoded.insert(name, (kind.into(), index));
         }
 
@@ -1680,7 +1692,7 @@ impl<'a> CompositionGraphEncoder<'a> {
         Ok(aggregator)
     }
 
-    fn definition(&self, state: &mut State, node: &Node) -> u32 {
+    fn definition(&self, state: &mut State, node: &Node) -> Result<u32, EncodeError> {
         let name = node.export.as_deref().unwrap();
 
         log::debug!(
@@ -1693,7 +1705,7 @@ impl<'a> CompositionGraphEncoder<'a> {
         let (ty, index) = match node.item_kind {
             ItemKind::Type(ty) => match ty {
                 Type::Resource(_) => panic!("resources cannot be defined"),
-                Type::Func(_) => (ty, encoder.ty(state, ty, None)),
+                Type::Func(_) => (ty, encoder.ty(state, ty, None)?),
                 Type::Value(vt) => {
                     // Check for an alias and use the existing index
                     if let ValueType::Defined(id) = vt {
@@ -1706,18 +1718,18 @@ impl<'a> CompositionGraphEncoder<'a> {
                             {
                                 (ty, index)
                             } else {
-                                (ty, encoder.ty(state, ty, None))
+                                (ty, encoder.ty(state, ty, None)?)
                             }
                         } else {
-                            (ty, encoder.ty(state, ty, None))
+                            (ty, encoder.ty(state, ty, None)?)
                         }
                     } else {
-                        (ty, encoder.ty(state, ty, None))
+                        (ty, encoder.ty(state, ty, None)?)
                     }
                 }
-                Type::Interface(id) => (ty, encoder.interface(state, id)),
-                Type::World(id) => (ty, encoder.world(state, id)),
-                Type::Module(_) => (ty, encoder.ty(state, ty, None)),
+                Type::Interface(id) => (ty, encoder.interface(state, id)?),
+                Type::World(id) => (ty, encoder.world(state, id)?),
+                Type::Module(_) => (ty, encoder.ty(state, ty, None)?),
             },
             _ => panic!("only types can be defined"),
         };
@@ -1730,10 +1742,16 @@ impl<'a> CompositionGraphEncoder<'a> {
         state.current.type_indexes.insert(ty, index);
 
         log::debug!("definition `{name}` encoded to type index {index}");
-        index
+        Ok(index)
     }
 
-    fn import(&self, state: &mut State, name: &str, types: &Types, kind: ItemKind) -> u32 {
+    fn import(
+        &self,
+        state: &mut State,
+        name: &str,
+        types: &Types,
+        kind: ItemKind,
+    ) -> Result<u32, EncodeError> {
         // Determine whether this is a component model `(implements "I")` import.
         // The same interface may be imported multiple times under different
         // labels, so implements imports are exempt from the shared-dependency
@@ -1749,7 +1767,7 @@ impl<'a> CompositionGraphEncoder<'a> {
             if let ItemKind::Instance(id) = kind {
                 if let Some(id) = &types[id].id {
                     if let Some(index) = state.current.instances.get(id) {
-                        return *index;
+                        return Ok(*index);
                     }
                 }
             }
@@ -1767,7 +1785,7 @@ impl<'a> CompositionGraphEncoder<'a> {
         );
 
         // Encode the type and import
-        let ty = encoder.extern_ty(state, name, kind, false);
+        let ty = encoder.extern_ty(state, name, kind, false)?;
         let extern_name = ComponentExternName {
             name: Cow::Borrowed(name),
             implements: implements.map(Cow::Borrowed),
@@ -1797,6 +1815,8 @@ impl<'a> CompositionGraphEncoder<'a> {
                 state.current.type_indexes.insert(ty, index);
             }
             ItemKind::Instance(id) => {
+                encoder.record_instance(state, index, id);
+
                 // Implements imports are not registered for shared-dependency
                 // aliasing: distinct labels of the same interface must remain
                 // distinct instances rather than collapsing to one.
@@ -1810,7 +1830,7 @@ impl<'a> CompositionGraphEncoder<'a> {
             _ => {}
         }
 
-        index
+        Ok(index)
     }
 
     fn instantiation(
@@ -1819,7 +1839,7 @@ impl<'a> CompositionGraphEncoder<'a> {
         index: NodeIndex,
         node: &Node,
         options: EncodeOptions,
-    ) -> u32 {
+    ) -> Result<u32, EncodeError> {
         let package_id = node.package.expect("instantiation requires a package");
         let package = self.0.packages[package_id.index].package.as_ref().unwrap();
         let imports = &self.0.types[package.ty()].imports;
@@ -1831,7 +1851,7 @@ impl<'a> CompositionGraphEncoder<'a> {
                 state.builder().component_raw(None, package.bytes())
             } else {
                 let encoder = TypeEncoder::new(&self.0.types);
-                let ty = encoder.component(state, package.ty());
+                let ty = encoder.component(state, package.ty())?;
                 state.builder().import(
                     Self::package_import_name(package),
                     ComponentTypeRef::Component(ty),
@@ -1881,7 +1901,7 @@ impl<'a> CompositionGraphEncoder<'a> {
             package = package.name(),
         );
 
-        index
+        Ok(index)
     }
 
     fn alias(&self, state: &mut State, node: NodeIndex) -> u32 {
@@ -2104,5 +2124,34 @@ mod test {
             graph.encode(EncodeOptions::default()).unwrap_err(),
             EncodeError::ExplicitImportTypeMergeConflict { .. }
         ));
+    }
+
+    #[test]
+    fn it_errors_on_an_explicit_import_using_a_resource_not_imported() {
+        let mut graph = CompositionGraph::new();
+        let bytes = wat::parse_str(
+            r#"(component $c
+                (import "foo" (instance $i (export "r" (type (sub resource)))))
+                (alias export $i "r" (type $r))
+                (type $bar (instance
+                    (alias outer $c $r (type))
+                    (type (own 0))
+                    (export "f" (func (param "x" 1)))
+                ))
+                (import "bar" (instance (type $bar)))
+            )"#,
+        )
+        .unwrap();
+        let package =
+            wac_types::Package::from_bytes("test:pkg", None, bytes, graph.types_mut()).unwrap();
+        let package = graph.register_package(package).unwrap();
+        let kind = graph.types()[graph[package].ty()].imports["bar"];
+        graph.import("bar", kind).unwrap();
+
+        let err = graph.encode(EncodeOptions::default()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cannot encode a use of resource `r` from outside of its scope"
+        );
     }
 }

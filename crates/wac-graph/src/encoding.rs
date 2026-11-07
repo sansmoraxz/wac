@@ -1,4 +1,4 @@
-use crate::PackageId;
+use crate::{EncodeError, PackageId};
 use indexmap::IndexMap;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
@@ -150,8 +150,65 @@ pub struct Scope {
     export_aliases: HashMap<(u32, String), u32>,
     /// The map of resource names to their encoded indexes.
     resources: IndexMap<String, u32>,
+    /// The map of resources, by the resource they alias, to their encoded
+    /// indexes.
+    resource_ids: HashMap<ResourceId, u32>,
+    /// The map of encoded resource indexes to the resource they alias.
+    resources_at: HashMap<u32, ResourceId>,
+    /// The map of resources exported by an instance in this scope, by the
+    /// resource they alias, to the instance's index and the export names
+    /// leading from it to the resource.
+    instance_resources: HashMap<ResourceId, (u32, Vec<String>)>,
+    /// The map of interface name and type export name to the index of the type
+    /// aliased from an instance of the interface in this or an enclosing scope.
+    used_types: HashMap<(String, String), u32>,
     /// The encodable for this scope.
     encodable: Encodable,
+}
+
+impl Scope {
+    /// Aliases the type export `name` of the instance at index `instance`,
+    /// reusing the alias if this scope already has one.
+    fn alias_type_export(&mut self, instance: u32, name: &str) -> u32 {
+        let key = (instance, name.to_string());
+        if let Some(index) = self.export_aliases.get(&key) {
+            return *index;
+        }
+
+        let index = self.encodable.type_count();
+        self.encodable.alias(Alias::InstanceExport {
+            instance,
+            kind: ComponentExportKind::Type,
+            name,
+        });
+        self.export_aliases.insert(key, index);
+        index
+    }
+
+    /// Gets the index of a resource, given by the resource it aliases, in this
+    /// scope, aliasing it from an instance exporting it if needed.
+    fn resource(&mut self, id: ResourceId) -> Option<u32> {
+        if let Some(index) = self.resource_ids.get(&id) {
+            return Some(*index);
+        }
+
+        let (mut instance, path) = self.instance_resources.get(&id)?.clone();
+        let (name, instances) = path.split_last().expect("a path names the resource");
+        for name in instances {
+            let index = self.encodable.instance_count();
+            self.encodable.alias(Alias::InstanceExport {
+                instance,
+                kind: ComponentExportKind::Instance,
+                name,
+            });
+            instance = index;
+        }
+
+        let index = self.alias_type_export(instance, name);
+        self.resource_ids.insert(id, index);
+        self.resources_at.insert(index, id);
+        Some(index)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -206,19 +263,90 @@ impl State {
     /// Aliases the type export `name` of the instance at index `instance`,
     /// reusing the alias if the current scope already has one.
     fn alias_type_export(&mut self, instance: u32, name: &str) -> u32 {
-        let key = (instance, name.to_string());
-        if let Some(index) = self.current.export_aliases.get(&key) {
+        self.current.alias_type_export(instance, name)
+    }
+
+    /// Gets the scope `depth` scopes out from the current one.
+    fn scope_mut(&mut self, depth: usize) -> &mut Scope {
+        match depth {
+            0 => &mut self.current,
+            _ => {
+                let len = self.scopes.len();
+                &mut self.scopes[len - depth]
+            }
+        }
+    }
+
+    /// Gets how many scopes out from the current one the nearest instance of
+    /// the interface `iid` is.
+    fn instance_depth(&self, iid: &str) -> Option<usize> {
+        std::iter::once(&self.current)
+            .chain(self.scopes.iter().rev())
+            .position(|scope| scope.instances.contains_key(iid))
+    }
+
+    /// Gets how many scopes out from the current one the nearest scope that
+    /// can import is.
+    fn importing_depth(&self) -> usize {
+        std::iter::once(&self.current)
+            .chain(self.scopes.iter().rev())
+            .position(|scope| !matches!(scope.encodable, Encodable::Instance(_)))
+            .expect("the outermost scope is a component")
+    }
+
+    /// Aliases the type export `name` of the nearest instance of the interface
+    /// `iid` into the current scope, through an outer alias if the instance is
+    /// in an enclosing scope.
+    fn alias_used_type(&mut self, iid: &str, name: &str) -> u32 {
+        let key = (iid.to_string(), name.to_string());
+        if let Some(index) = self.current.used_types.get(&key) {
             return *index;
         }
 
-        let index = self.current.encodable.type_count();
-        self.current.encodable.alias(Alias::InstanceExport {
-            instance,
-            kind: ComponentExportKind::Type,
-            name,
-        });
-        self.current.export_aliases.insert(key, index);
+        let depth = self
+            .instance_depth(iid)
+            .expect("a used interface should have an instance");
+        let scope = self.scope_mut(depth);
+        let index = scope.alias_type_export(scope.instances[iid], name);
+        let index = self.alias_outer_type(depth, index);
+        self.current.used_types.insert(key, index);
         index
+    }
+
+    /// Aliases the type at `index` of the scope `depth` scopes out into the
+    /// current scope.
+    fn alias_outer_type(&mut self, depth: usize, index: u32) -> u32 {
+        if depth == 0 {
+            return index;
+        }
+
+        let outer = index;
+        let index = self.current.encodable.type_count();
+        self.current.encodable.alias(Alias::Outer {
+            kind: ComponentOuterAliasKind::Type,
+            count: depth as u32,
+            index: outer,
+        });
+        index
+    }
+
+    /// Makes the scope `depth` scopes out the current one, returning the
+    /// scopes left for [`Self::leave`].
+    fn enter(&mut self, depth: usize) -> Vec<Scope> {
+        let mut left = Vec::with_capacity(depth);
+        for _ in 0..depth {
+            let parent = self.scopes.pop().expect("expected a scope to enter");
+            left.push(std::mem::replace(&mut self.current, parent));
+        }
+        left
+    }
+
+    /// Returns to the scopes left by [`Self::enter`].
+    fn leave(&mut self, mut left: Vec<Scope>) {
+        while let Some(scope) = left.pop() {
+            let parent = std::mem::replace(&mut self.current, scope);
+            self.scopes.push(parent);
+        }
     }
 
     fn used_type_index(&mut self, name: &str) -> Option<u32> {
@@ -270,45 +398,45 @@ impl<'a> TypeEncoder<'a> {
         Some(index)
     }
 
-    pub fn ty(&self, state: &mut State, ty: Type, name: Option<&str>) -> u32 {
+    pub fn ty(&self, state: &mut State, ty: Type, name: Option<&str>) -> Result<u32, EncodeError> {
         if let Some(index) = state.current.type_indexes.get(&ty) {
-            return *index;
+            return Ok(*index);
         }
 
         if let Some(name) = name {
             if let Some(index) = state.used_type_index(name) {
                 state.current.type_indexes.insert(ty, index);
-                return index;
+                return Ok(index);
             }
         }
 
         let index = match ty {
             Type::Resource(_) => panic!("cannot encode a resource"),
-            Type::Func(id) => self.func_type(state, id),
+            Type::Func(id) => self.func_type(state, id)?,
             Type::Value(ValueType::Primitive(ty)) => Self::primitive(state, ty),
-            Type::Value(ValueType::Borrow(id)) => self.borrow(state, id),
-            Type::Value(ValueType::Own(id)) => self.own(state, id),
-            Type::Value(ValueType::Defined(id)) => self.defined(state, id),
-            Type::Interface(id) => self.instance(state, id, false),
-            Type::World(id) => self.component(state, id),
+            Type::Value(ValueType::Borrow(id)) => self.borrow(state, id)?,
+            Type::Value(ValueType::Own(id)) => self.own(state, id)?,
+            Type::Value(ValueType::Defined(id)) => self.defined(state, id)?,
+            Type::Interface(id) => self.instance(state, id, false)?,
+            Type::World(id) => self.component(state, id)?,
             Type::Module(id) => self.module(state, id),
         };
 
         state.current.type_indexes.insert(ty, index);
-        index
+        Ok(index)
     }
 
-    fn func_type(&self, state: &mut State, id: FuncTypeId) -> u32 {
+    fn func_type(&self, state: &mut State, id: FuncTypeId) -> Result<u32, EncodeError> {
         log::debug!("encoding function type");
         let ty = &self.0[id];
 
         let params = ty
             .params
             .iter()
-            .map(|(n, ty)| (n.as_str(), self.value_type(state, *ty)))
-            .collect::<Vec<_>>();
+            .map(|(n, ty)| Ok((n.as_str(), self.value_type(state, *ty)?)))
+            .collect::<Result<Vec<_>, EncodeError>>()?;
 
-        let result = ty.result.map(|ty| self.value_type(state, ty));
+        let result = ty.result.map(|ty| self.value_type(state, ty)).transpose()?;
         let index = state.current.encodable.type_count();
         let mut encoder = state.current.encodable.ty().function();
         encoder.async_(ty.is_async);
@@ -316,33 +444,35 @@ impl<'a> TypeEncoder<'a> {
         encoder.result(result);
 
         log::debug!("function type encoded to type index {index}");
-        index
+        Ok(index)
     }
 
-    fn defined(&self, state: &mut State, id: DefinedTypeId) -> u32 {
+    fn defined(&self, state: &mut State, id: DefinedTypeId) -> Result<u32, EncodeError> {
         log::debug!("encoding defined type");
         let ty = &self.0[id];
         let index = match ty {
-            DefinedType::Tuple(types) => self.tuple(state, types),
-            DefinedType::List(ty) => self.list(state, *ty),
-            DefinedType::FixedSizeList(ty, elements) => self.fixed_size_list(state, *ty, *elements),
-            DefinedType::Map(key, value) => self.map(state, *key, *value),
-            DefinedType::Option(ty) => self.option(state, *ty),
-            DefinedType::Result { ok, err } => self.result(state, *ok, *err),
-            DefinedType::Variant(v) => self.variant(state, v),
-            DefinedType::Record(r) => self.record(state, r),
+            DefinedType::Tuple(types) => self.tuple(state, types)?,
+            DefinedType::List(ty) => self.list(state, *ty)?,
+            DefinedType::FixedSizeList(ty, elements) => {
+                self.fixed_size_list(state, *ty, *elements)?
+            }
+            DefinedType::Map(key, value) => self.map(state, *key, *value)?,
+            DefinedType::Option(ty) => self.option(state, *ty)?,
+            DefinedType::Result { ok, err } => self.result(state, *ok, *err)?,
+            DefinedType::Variant(v) => self.variant(state, v)?,
+            DefinedType::Record(r) => self.record(state, r)?,
             DefinedType::Flags(f) => self.flags(state, f),
             DefinedType::Enum(e) => self.enum_type(state, e),
             DefinedType::Alias(ValueType::Primitive(ty)) => Self::primitive(state, *ty),
-            DefinedType::Alias(ValueType::Borrow(id)) => self.borrow(state, *id),
-            DefinedType::Alias(ValueType::Own(id)) => self.own(state, *id),
-            DefinedType::Alias(ValueType::Defined(id)) => self.defined(state, *id),
-            DefinedType::Stream(ty) => self.stream(state, *ty),
-            DefinedType::Future(ty) => self.future(state, *ty),
+            DefinedType::Alias(ValueType::Borrow(id)) => self.borrow(state, *id)?,
+            DefinedType::Alias(ValueType::Own(id)) => self.own(state, *id)?,
+            DefinedType::Alias(ValueType::Defined(id)) => self.defined(state, *id)?,
+            DefinedType::Stream(ty) => self.stream(state, *ty)?,
+            DefinedType::Future(ty) => self.future(state, *ty)?,
         };
 
         log::debug!("defined type encoded to type index {index}");
-        index
+        Ok(index)
     }
 
     fn use_aliases(
@@ -356,13 +486,12 @@ impl<'a> TypeEncoder<'a> {
         for (name, used) in uses {
             let interface = &self.0[used.interface];
             let iid = interface.id.as_ref().expect("interface should have an id");
-            let instance = state.current.instances[iid];
             let export: &String = used.name.as_ref().unwrap_or(name);
             let kind = interface.exports.get(export).unwrap();
-            let index = state.alias_type_export(instance, export);
+            let index = state.alias_used_type(iid, export);
 
             log::debug!(
-                "aliased {kind} export `{export}` of instance index {instance} ({iid}) to type index {index}",
+                "aliased {kind} export `{export}` of interface `{iid}` to type index {index}",
                 kind = kind.desc(self.0)
             );
 
@@ -381,11 +510,16 @@ impl<'a> TypeEncoder<'a> {
         }
     }
 
-    fn instance(&self, state: &mut State, id: InterfaceId, types_only: bool) -> u32 {
+    fn instance(
+        &self,
+        state: &mut State,
+        id: InterfaceId,
+        types_only: bool,
+    ) -> Result<u32, EncodeError> {
         log::debug!("encoding instance type");
         let interface = &self.0[id];
         for used in interface.uses.values() {
-            self.import_deps(state, used.interface);
+            self.import_deps(state, used.interface)?;
         }
 
         // Encode any required aliases
@@ -396,11 +530,11 @@ impl<'a> TypeEncoder<'a> {
         for (name, kind) in &interface.exports {
             match kind {
                 ItemKind::Type(_) => {
-                    self.export(state, name, *kind);
+                    self.export(state, name, *kind)?;
                 }
                 _ => {
                     if !types_only {
-                        self.export(state, name, *kind);
+                        self.export(state, name, *kind)?;
                     }
                 }
             }
@@ -411,7 +545,7 @@ impl<'a> TypeEncoder<'a> {
                 let index = state.current.encodable.type_count();
                 state.current.encodable.ty().instance(&ty);
                 log::debug!("instance type encoded to type index {index}");
-                index
+                Ok(index)
             }
             _ => panic!("expected the pushed encodable to be an instance type"),
         }
@@ -432,7 +566,7 @@ impl<'a> TypeEncoder<'a> {
         name: &str,
         kind: ItemKind,
         resolve_used: bool,
-    ) -> u32 {
+    ) -> Result<u32, EncodeError> {
         match kind {
             ItemKind::Instance(id) if is_label(name) && !self.shares_instance_type(id) => {
                 self.instance(state, id, false)
@@ -457,24 +591,24 @@ impl<'a> TypeEncoder<'a> {
                 .all(|kind| matches!(kind, ItemKind::Func(_) | ItemKind::Type(Type::Resource(_))))
     }
 
-    pub fn component(&self, state: &mut State, id: WorldId) -> u32 {
+    pub fn component(&self, state: &mut State, id: WorldId) -> Result<u32, EncodeError> {
         log::debug!("encoding component type");
         let world = &self.0[id];
 
         state.push(Encodable::Component(ComponentType::default()));
 
         for used in world.uses.values() {
-            self.import_deps(state, used.interface);
+            self.import_deps(state, used.interface)?;
         }
 
         self.use_aliases(state, &world.uses, &world.imports);
 
         for (name, kind) in &world.imports {
-            self.import(state, name, *kind);
+            self.import(state, name, *kind)?;
         }
 
         for (name, kind) in &world.exports {
-            self.export(state, name, *kind);
+            self.export(state, name, *kind)?;
         }
 
         match state.pop() {
@@ -482,28 +616,41 @@ impl<'a> TypeEncoder<'a> {
                 let index = state.current.encodable.type_count();
                 state.current.encodable.ty().component(&ty);
                 log::debug!("component type encoded to type index {index}");
-                index
+                Ok(index)
             }
             _ => panic!("expected the pushed encodable to be a component type"),
         }
     }
 
-    fn import_deps(&self, state: &mut State, id: InterfaceId) {
+    fn import_deps(&self, state: &mut State, id: InterfaceId) -> Result<(), EncodeError> {
         let iid = self.0[id].id.as_ref().expect("interface should have an id");
         if state.current.instances.contains_key(iid) {
-            return;
+            return Ok(());
+        }
+
+        // An instance type has no imports, so it uses the interface from an
+        // enclosing scope, which imports it if none has it yet.
+        if matches!(state.current.encodable, Encodable::Instance(_)) {
+            if state.instance_depth(iid).is_some() {
+                return Ok(());
+            }
+
+            let left = state.enter(state.importing_depth());
+            let result = self.import_deps(state, id);
+            state.leave(left);
+            return result;
         }
 
         let interface = &self.0[id];
 
         // Depth-first recurse on the dependencies of this interface
         for used in interface.uses.values() {
-            self.import_deps(state, used.interface);
+            self.import_deps(state, used.interface)?;
         }
 
         log::debug!("encoding dependency on interface `{iid}`");
 
-        let index = self.instance(state, id, !state.scopes.is_empty());
+        let index = self.instance(state, id, !state.scopes.is_empty())?;
         let import_index = state.current.encodable.instance_count();
 
         state
@@ -515,9 +662,10 @@ impl<'a> TypeEncoder<'a> {
             "interface `{iid}` is available for aliasing from instance index {import_index}"
         );
         state.current.instances.insert(iid.clone(), import_index);
+        Ok(())
     }
 
-    pub fn interface(&self, state: &mut State, id: InterfaceId) -> u32 {
+    pub fn interface(&self, state: &mut State, id: InterfaceId) -> Result<u32, EncodeError> {
         let interface = &self.0[id];
         let iid = interface.id.as_deref().expect("interface must have an id");
         log::debug!("encoding interface definition of `{iid}`");
@@ -525,10 +673,10 @@ impl<'a> TypeEncoder<'a> {
         state.push(Encodable::Component(ComponentType::default()));
 
         for used in interface.uses.values() {
-            self.import_deps(state, used.interface);
+            self.import_deps(state, used.interface)?;
         }
 
-        let index = self.instance(state, id, false);
+        let index = self.instance(state, id, false)?;
         Self::export_type(state, iid, ComponentTypeRef::Instance(index));
 
         match state.pop() {
@@ -536,20 +684,20 @@ impl<'a> TypeEncoder<'a> {
                 let (index, encoder) = state.builder().ty(None);
                 encoder.component(&ty);
                 log::debug!("encoded interface definition of `{iid}` to type index {index}",);
-                index
+                Ok(index)
             }
             _ => panic!("expected the pushed encodable to be a component type"),
         }
     }
 
-    pub fn world(&self, state: &mut State, id: WorldId) -> u32 {
+    pub fn world(&self, state: &mut State, id: WorldId) -> Result<u32, EncodeError> {
         let world = &self.0[id];
         let world_id = world.id.as_deref().expect("world must have an id");
         log::debug!("encoding world definition of `{world_id}`");
 
         assert!(state.scopes.is_empty());
         state.push(Encodable::Component(ComponentType::default()));
-        let index = self.component(state, id);
+        let index = self.component(state, id)?;
         Self::export_type(state, world_id, ComponentTypeRef::Component(index));
 
         match state.pop() {
@@ -557,7 +705,7 @@ impl<'a> TypeEncoder<'a> {
                 let (index, encoder) = state.builder().ty(None);
                 encoder.component(&ty);
                 log::debug!("encoded world definition of `{world_id}` to type index {index}");
-                index
+                Ok(index)
             }
             _ => panic!("expected the push encodable to be a component type"),
         }
@@ -643,24 +791,28 @@ impl<'a> TypeEncoder<'a> {
         }
     }
 
-    pub fn value_type(&self, state: &mut State, ty: ValueType) -> ComponentValType {
+    pub fn value_type(
+        &self,
+        state: &mut State,
+        ty: ValueType,
+    ) -> Result<ComponentValType, EncodeError> {
         if let Some(index) = state.current.type_indexes.get(&Type::Value(ty)) {
-            return ComponentValType::Type(*index);
+            return Ok(ComponentValType::Type(*index));
         }
 
         if let Some(index) = self.alias_from_instance_export(state, ty) {
-            return ComponentValType::Type(index);
+            return Ok(ComponentValType::Type(index));
         }
 
         let index = match ty {
-            ValueType::Primitive(ty) => return ComponentValType::Primitive(ty.into()),
-            ValueType::Borrow(id) => self.borrow(state, id),
-            ValueType::Own(id) => self.own(state, id),
-            ValueType::Defined(id) => self.defined(state, id),
+            ValueType::Primitive(ty) => return Ok(ComponentValType::Primitive(ty.into())),
+            ValueType::Borrow(id) => self.borrow(state, id)?,
+            ValueType::Own(id) => self.own(state, id)?,
+            ValueType::Defined(id) => self.defined(state, id)?,
         };
 
         state.current.type_indexes.insert(Type::Value(ty), index);
-        ComponentValType::Type(index)
+        Ok(ComponentValType::Type(index))
     }
 
     fn primitive(state: &mut State, ty: PrimitiveType) -> u32 {
@@ -674,33 +826,38 @@ impl<'a> TypeEncoder<'a> {
         index
     }
 
-    fn tuple(&self, state: &mut State, types: &[ValueType]) -> u32 {
+    fn tuple(&self, state: &mut State, types: &[ValueType]) -> Result<u32, EncodeError> {
         let types = types
             .iter()
             .map(|ty| self.value_type(state, *ty))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().tuple(types);
-        index
+        Ok(index)
     }
 
-    fn list(&self, state: &mut State, ty: ValueType) -> u32 {
-        let ty = self.value_type(state, ty);
+    fn list(&self, state: &mut State, ty: ValueType) -> Result<u32, EncodeError> {
+        let ty = self.value_type(state, ty)?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().list(ty);
-        index
+        Ok(index)
     }
 
-    fn map(&self, state: &mut State, key: ValueType, value: ValueType) -> u32 {
-        let key = self.value_type(state, key);
-        let value = self.value_type(state, value);
+    fn map(&self, state: &mut State, key: ValueType, value: ValueType) -> Result<u32, EncodeError> {
+        let key = self.value_type(state, key)?;
+        let value = self.value_type(state, value)?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().map(key, value);
-        index
+        Ok(index)
     }
 
-    fn fixed_size_list(&self, state: &mut State, ty: ValueType, elements: u32) -> u32 {
-        let ty = self.value_type(state, ty);
+    fn fixed_size_list(
+        &self,
+        state: &mut State,
+        ty: ValueType,
+        elements: u32,
+    ) -> Result<u32, EncodeError> {
+        let ty = self.value_type(state, ty)?;
         let index = state.current.encodable.type_count();
         state
             .current
@@ -708,73 +865,147 @@ impl<'a> TypeEncoder<'a> {
             .ty()
             .defined_type()
             .fixed_length_list(ty, elements);
-        index
+        Ok(index)
     }
 
-    fn stream(&self, state: &mut State, ty: Option<ValueType>) -> u32 {
-        let ty = ty.map(|ty| self.value_type(state, ty));
+    fn stream(&self, state: &mut State, ty: Option<ValueType>) -> Result<u32, EncodeError> {
+        let ty = ty.map(|ty| self.value_type(state, ty)).transpose()?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().stream(ty);
-        index
+        Ok(index)
     }
 
-    fn future(&self, state: &mut State, ty: Option<ValueType>) -> u32 {
-        let ty = ty.map(|ty| self.value_type(state, ty));
+    fn future(&self, state: &mut State, ty: Option<ValueType>) -> Result<u32, EncodeError> {
+        let ty = ty.map(|ty| self.value_type(state, ty)).transpose()?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().future(ty);
-        index
+        Ok(index)
     }
 
-    fn option(&self, state: &mut State, ty: ValueType) -> u32 {
-        let ty = self.value_type(state, ty);
+    fn option(&self, state: &mut State, ty: ValueType) -> Result<u32, EncodeError> {
+        let ty = self.value_type(state, ty)?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().option(ty);
-        index
+        Ok(index)
     }
 
-    fn result(&self, state: &mut State, ok: Option<ValueType>, err: Option<ValueType>) -> u32 {
-        let ok = ok.map(|ty| self.value_type(state, ty));
-        let err = err.map(|ty| self.value_type(state, ty));
+    fn result(
+        &self,
+        state: &mut State,
+        ok: Option<ValueType>,
+        err: Option<ValueType>,
+    ) -> Result<u32, EncodeError> {
+        let ok = ok.map(|ty| self.value_type(state, ty)).transpose()?;
+        let err = err.map(|ty| self.value_type(state, ty)).transpose()?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().result(ok, err);
-        index
+        Ok(index)
     }
 
-    fn borrow(&self, state: &mut State, res: ResourceId) -> u32 {
-        let res = state.current.resources[self.0[res].name.as_str()];
+    /// Gets the index of a resource in the current scope, aliasing it from an
+    /// instance exporting it or from an enclosing scope if needed.
+    fn resource_index(&self, state: &mut State, id: ResourceId) -> Result<u32, EncodeError> {
+        let resolved = self.0.resolve_resource(id);
+
+        // Prefer the resource's own name, as the source names it
+        let name = self.0[id].name.as_str();
+        if let Some(index) = state.current.resources.get(name) {
+            if state.current.resources_at.get(index) == Some(&resolved) {
+                return Ok(*index);
+            }
+        }
+
+        for depth in 0..=state.scopes.len() {
+            if let Some(index) = state.scope_mut(depth).resource(resolved) {
+                let index = state.alias_outer_type(depth, index);
+                state.current.resource_ids.insert(resolved, index);
+                state.current.resources_at.insert(index, resolved);
+                return Ok(index);
+            }
+        }
+
+        Err(EncodeError::UnsupportedType {
+            message: format!("a use of resource `{name}` from outside of its scope"),
+        })
+    }
+
+    /// Records the resource at `index` of the current scope.
+    fn record_resource(&self, state: &mut State, id: ResourceId, index: u32) {
+        let resolved = self.0.resolve_resource(id);
+        state.current.resource_ids.entry(resolved).or_insert(index);
+        state.current.resources_at.insert(index, resolved);
+    }
+
+    /// Records the resources the instance at `index` of the current scope
+    /// exports, directly or through instances it exports.
+    pub fn record_instance(&self, state: &mut State, index: u32, id: InterfaceId) {
+        self.record_instance_exports(state, index, id, &mut Vec::new());
+    }
+
+    fn record_instance_exports(
+        &self,
+        state: &mut State,
+        index: u32,
+        id: InterfaceId,
+        path: &mut Vec<String>,
+    ) {
+        for (name, kind) in &self.0[id].exports {
+            path.push(name.clone());
+            match kind {
+                ItemKind::Type(Type::Resource(res)) => {
+                    state
+                        .current
+                        .instance_resources
+                        .entry(self.0.resolve_resource(*res))
+                        .or_insert_with(|| (index, path.clone()));
+                }
+                ItemKind::Instance(id) => self.record_instance_exports(state, index, *id, path),
+                _ => {}
+            }
+            path.pop();
+        }
+    }
+
+    fn borrow(&self, state: &mut State, res: ResourceId) -> Result<u32, EncodeError> {
+        let res = self.resource_index(state, res)?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().borrow(res);
-        index
+        Ok(index)
     }
 
-    fn own(&self, state: &mut State, res: ResourceId) -> u32 {
-        let res = state.current.resources[self.0[res].name.as_str()];
+    fn own(&self, state: &mut State, res: ResourceId) -> Result<u32, EncodeError> {
+        let res = self.resource_index(state, res)?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().own(res);
-        index
+        Ok(index)
     }
 
-    fn variant(&self, state: &mut State, variant: &Variant) -> u32 {
+    fn variant(&self, state: &mut State, variant: &Variant) -> Result<u32, EncodeError> {
         let cases = variant
             .cases
             .iter()
-            .map(|(n, ty)| (n.as_str(), ty.map(|ty| self.value_type(state, ty))))
-            .collect::<Vec<_>>();
+            .map(|(n, ty)| {
+                Ok((
+                    n.as_str(),
+                    ty.map(|ty| self.value_type(state, ty)).transpose()?,
+                ))
+            })
+            .collect::<Result<Vec<_>, EncodeError>>()?;
 
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().variant(cases);
-        index
+        Ok(index)
     }
 
-    fn record(&self, state: &mut State, record: &Record) -> u32 {
+    fn record(&self, state: &mut State, record: &Record) -> Result<u32, EncodeError> {
         let fields = record
             .fields
             .iter()
-            .map(|(n, ty)| (n.as_str(), self.value_type(state, *ty)))
-            .collect::<Vec<_>>();
+            .map(|(n, ty)| Ok((n.as_str(), self.value_type(state, *ty)?)))
+            .collect::<Result<Vec<_>, EncodeError>>()?;
         let index = state.current.encodable.type_count();
         state.current.encodable.ty().defined_type().record(fields);
-        index
+        Ok(index)
     }
 
     fn flags(&self, state: &mut State, flags: &Flags) -> u32 {
@@ -799,24 +1030,24 @@ impl<'a> TypeEncoder<'a> {
         index
     }
 
-    fn import(&self, state: &mut State, name: &str, kind: ItemKind) {
+    fn import(&self, state: &mut State, name: &str, kind: ItemKind) -> Result<(), EncodeError> {
         if let ItemKind::Type(Type::Resource(id)) = kind {
-            self.import_resource(state, name, id);
-            return;
+            self.import_resource(state, name, id)?;
+            return Ok(());
         }
 
         log::debug!("encoding {kind} import `{name}`", kind = kind.desc(self.0));
         let ty = kind.ty();
         if let ItemKind::Value(ty) = kind {
-            let ty = self.value_type(state, ty);
+            let ty = self.value_type(state, ty)?;
             state
                 .current
                 .encodable
                 .import_type(name, ComponentTypeRef::Value(ty));
-            return;
+            return Ok(());
         }
 
-        let index = self.extern_ty(state, name, kind, true);
+        let index = self.extern_ty(state, name, kind, true)?;
 
         match kind {
             ItemKind::Type(_) => {
@@ -848,6 +1079,7 @@ impl<'a> TypeEncoder<'a> {
                     .current
                     .encodable
                     .import_type(extern_name, ComponentTypeRef::Instance(index));
+                self.record_instance(state, import_index, id);
                 if implements.is_none() {
                     if let Some(iid) = &self.0[id].id {
                         log::debug!(
@@ -871,11 +1103,18 @@ impl<'a> TypeEncoder<'a> {
             }
             ItemKind::Value(_) => unreachable!("values are imported above"),
         }
+
+        Ok(())
     }
 
-    pub fn import_resource(&self, state: &mut State, name: &str, id: ResourceId) -> u32 {
+    pub fn import_resource(
+        &self,
+        state: &mut State,
+        name: &str,
+        id: ResourceId,
+    ) -> Result<u32, EncodeError> {
         if let Some(index) = state.current.resources.get(name) {
-            return *index;
+            return Ok(*index);
         }
 
         log::debug!("encoding import of resource `{name}`");
@@ -893,11 +1132,9 @@ impl<'a> TypeEncoder<'a> {
             index
         } else if let Some(alias) = resource.alias {
             let source = self.0.resolve_resource(alias.source);
-            let source_index = if let Some(index) =
-                state.current.resources.get(self.0[source].name.as_str())
-            {
-                // The source resource was previously imported
-                *index
+            let source_index = if let Ok(index) = self.resource_index(state, source) {
+                // The source resource is in scope or can be aliased into it
+                index
             } else if let Some(index) = state.current.type_indexes.get(&Type::Resource(source)) {
                 // The source resource isn't directly imported, but was previously aliased
                 *index
@@ -905,7 +1142,8 @@ impl<'a> TypeEncoder<'a> {
                 // Otherwise, we need to alias the source resource
                 // This should only occur for resources owned by interfaces
                 let source_index = state.current.encodable.type_count();
-                let iid = self.0[alias.owner.expect("should have owner")]
+                let owner = alias.owner.expect("resource should have an owner");
+                let iid = self.0[owner]
                     .id
                     .as_deref()
                     .expect("expected an interface with an id");
@@ -942,10 +1180,11 @@ impl<'a> TypeEncoder<'a> {
         };
 
         state.current.resources.insert(resource.name.clone(), index);
-        index
+        self.record_resource(state, id, index);
+        Ok(index)
     }
 
-    fn export(&self, state: &mut State, name: &str, kind: ItemKind) -> u32 {
+    fn export(&self, state: &mut State, name: &str, kind: ItemKind) -> Result<u32, EncodeError> {
         if let ItemKind::Type(Type::Resource(id)) = kind {
             return self.export_resource(state, name, id);
         }
@@ -956,11 +1195,12 @@ impl<'a> TypeEncoder<'a> {
         );
 
         if let ItemKind::Value(ty) = kind {
-            let ty = self.value_type(state, ty);
-            return Self::export_type(state, name, ComponentTypeRef::Value(ty));
+            let ty = self.value_type(state, ty)?;
+            return Ok(Self::export_type(state, name, ComponentTypeRef::Value(ty)));
         }
 
-        let index = self.extern_ty(state, name, kind, true);
+        let index = self.extern_ty(state, name, kind, true)?;
+        let instance_index = state.current.encodable.instance_count();
         // Preserve the `(implements "I")` directive when re-encoding an
         // instance export that uses a plain-name label.
         let implements = implements_directive(self.0, name, kind);
@@ -983,19 +1223,39 @@ impl<'a> TypeEncoder<'a> {
             },
         );
 
-        // For types, remap to the index of the exported item
-        if let ItemKind::Type(ty) = kind {
-            state.current.type_indexes.insert(ty, index);
+        match kind {
+            // For types, remap to the index of the exported item
+            ItemKind::Type(ty) => {
+                state.current.type_indexes.insert(ty, index);
+            }
+            ItemKind::Instance(id) => {
+                self.record_instance(state, instance_index, id);
+
+                // Later items may use types of the exported interface
+                if let (None, Some(iid)) = (implements, &self.0[id].id) {
+                    state
+                        .current
+                        .instances
+                        .entry(iid.clone())
+                        .or_insert(instance_index);
+                }
+            }
+            _ => {}
         }
 
-        index
+        Ok(index)
     }
 
-    fn export_resource(&self, state: &mut State, name: &str, id: ResourceId) -> u32 {
+    fn export_resource(
+        &self,
+        state: &mut State,
+        name: &str,
+        id: ResourceId,
+    ) -> Result<u32, EncodeError> {
         log::debug!("encoding export of resource `{name}`");
 
         if let Some(existing) = state.current.resources.get(name) {
-            return *existing;
+            return Ok(*existing);
         }
 
         let resource = &self.0[id];
@@ -1007,8 +1267,7 @@ impl<'a> TypeEncoder<'a> {
             index
         } else if let Some(alias) = resource.alias {
             // This is an alias to another resource at the same scope
-            let index = state.current.resources
-                [self.0[self.0.resolve_resource(alias.source)].name.as_str()];
+            let index = self.resource_index(state, self.0.resolve_resource(alias.source))?;
             let index =
                 Self::export_type(state, name, ComponentTypeRef::Type(TypeBounds::Eq(index)));
             log::debug!("encoded alias for resource `{name}` as type index {index}");
@@ -1022,7 +1281,8 @@ impl<'a> TypeEncoder<'a> {
         };
 
         state.current.resources.insert(resource.name.clone(), index);
-        index
+        self.record_resource(state, id, index);
+        Ok(index)
     }
 
     fn export_type<'b>(

@@ -659,6 +659,12 @@ pub enum Error {
         #[source]
         source: BinaryReaderError,
     },
+    /// The graph imports a type that cannot be encoded.
+    #[error("cannot encode {message}")]
+    UnsupportedType {
+        /// What cannot be encoded.
+        message: String,
+    },
 }
 
 /// Represents a resolution result.
@@ -731,6 +737,7 @@ impl Resolution<'_> {
                 span: self.import_spans[&node],
                 source,
             },
+            EncodeError::UnsupportedType { message } => Error::UnsupportedType { message },
         })
     }
 
