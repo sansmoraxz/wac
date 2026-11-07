@@ -29,6 +29,10 @@ pub struct TypeAggregator {
     remapped: HashMap<Type, Type>,
     /// A map of interface names to remapped interface id.
     interfaces: HashMap<String, InterfaceId>,
+    /// A map from foreign interfaces of labelled externs to their remapped
+    /// interfaces, which an interface name doesn't find, as each label is an
+    /// extern of its own.
+    labelled: HashMap<InterfaceId, InterfaceId>,
     /// Maps import names that were superseded by a higher semver-compatible
     /// version to the canonical (highest version) name.
     name_redirects: HashMap<String, String>,
@@ -106,13 +110,16 @@ impl TypeAggregator {
         if let Some(existing) = self.imports.get(name).copied() {
             self.merge_item_kind(existing, types, kind, checker)?;
 
-            // An unnamed interface is found by what it was remapped to, so
-            // later uses of this one find the import it merged into.
+            // An unnamed or labelled interface is found by what it was
+            // remapped to, so later uses of this one find the import it merged
+            // into.
             if let (ItemKind::Instance(existing), ItemKind::Instance(id)) = (existing, kind) {
                 if types[id].id.is_none() {
                     self.remapped
                         .entry(Type::Interface(id))
                         .or_insert(Type::Interface(existing));
+                } else if is_label(name) {
+                    self.labelled.entry(id).or_insert(existing);
                 }
             }
             return Ok(self);
@@ -311,7 +318,7 @@ impl TypeAggregator {
             }
 
             // Remap the used interface; this will handle merging if we've seen the interface before
-            let remapped = self.remap_interface(types, used.interface, checker)?;
+            let remapped = self.remap_used_interface(types, used.interface, checker)?;
             match self.types[existing].uses.get(name) {
                 // Interfaces without a name are the same only if they are
                 // one remapped interface
@@ -443,7 +450,7 @@ impl TypeAggregator {
             }
 
             // Remap the used interface; this will handle merging if we've seen the interface before
-            let remapped = self.remap_interface(types, used.interface, checker)?;
+            let remapped = self.remap_used_interface(types, used.interface, checker)?;
             match self.types[existing].uses.get(name) {
                 // Interfaces without a name are the same only if they are
                 // one remapped interface
@@ -719,17 +726,20 @@ impl TypeAggregator {
             alias: resource
                 .alias
                 .map(|a| -> Result<_> {
-                    let owner = a
-                        .owner
-                        .map(|id| {
-                            // There's no need to merge the interface here as
-                            // merging is done as part of the interface remapping
-                            self.remap_interface(types, id, checker)
-                        })
-                        .transpose()?;
+                    let labelled = a.owner.and_then(|id| self.labelled.get(&id).copied());
+                    let owner = match labelled {
+                        Some(owner) => Some(owner),
+                        // There's no need to merge the interface here as
+                        // merging is done as part of the interface remapping
+                        None => a
+                            .owner
+                            .map(|id| self.remap_interface(types, id, checker))
+                            .transpose()?,
+                    };
                     // If there is a named owning interface, ensure it is
-                    // imported; an unnamed one is imported under its extern's name.
-                    if let Some(owner) = owner {
+                    // imported; an unnamed or labelled one is imported under
+                    // its extern's name.
+                    if let (Some(owner), None) = (owner, labelled) {
                         if let Some(name) = self.types[owner].id.clone() {
                             self.imports
                                 .entry(name)
@@ -857,6 +867,20 @@ impl TypeAggregator {
         Ok(remapped)
     }
 
+    /// Remaps the interface a type or resource is used from, which is that of
+    /// a labelled extern if one has been remapped.
+    fn remap_used_interface(
+        &mut self,
+        types: &Types,
+        id: InterfaceId,
+        checker: &mut SubtypeChecker,
+    ) -> Result<InterfaceId> {
+        match self.labelled.get(&id) {
+            Some(remapped) => Ok(*remapped),
+            None => self.remap_interface(types, id, checker),
+        }
+    }
+
     /// Remaps the interface of a labelled instance extern to a new interface.
     ///
     /// Unlike [`Self::remap_interface`], the new interface neither merges with
@@ -871,13 +895,16 @@ impl TypeAggregator {
     ) -> Result<InterfaceId> {
         let remapped = self.types.add_interface(Interface::default());
 
-        // An unnamed interface is only found by what it was remapped to, as
-        // a use of one of its types or an owner of one of its resources, so
-        // it is remapped before its definition is, which can use it.
+        // An unnamed or labelled interface is only found by what it was
+        // remapped to, as a use of one of its types or an owner of one of its
+        // resources, so it is remapped before its definition is, which can
+        // use it.
         if types[id].id.is_none() {
             self.remapped
                 .entry(Type::Interface(id))
                 .or_insert(Type::Interface(remapped));
+        } else {
+            self.labelled.entry(id).or_insert(remapped);
         }
         self.types[remapped] = self.remap_interface_definition(types, id, checker)?;
         Ok(remapped)
@@ -900,7 +927,7 @@ impl TypeAggregator {
                     Ok((
                         n.clone(),
                         UsedType {
-                            interface: self.remap_interface(types, u.interface, checker)?,
+                            interface: self.remap_used_interface(types, u.interface, checker)?,
                             name: u.name.clone(),
                         },
                     ))
@@ -937,7 +964,7 @@ impl TypeAggregator {
                     Ok((
                         n.clone(),
                         UsedType {
-                            interface: self.remap_interface(types, u.interface, checker)?,
+                            interface: self.remap_used_interface(types, u.interface, checker)?,
                             name: u.name.clone(),
                         },
                     ))

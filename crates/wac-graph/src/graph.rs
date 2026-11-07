@@ -1815,7 +1815,8 @@ impl<'a> CompositionGraphEncoder<'a> {
                 state.current.type_indexes.insert(ty, index);
             }
             ItemKind::Instance(id) => {
-                encoder.record_instance(state, index, id);
+                let by_name = implements.is_none() && types[id].id.is_some();
+                encoder.record_instance(state, index, id, by_name);
 
                 // Implements imports are not registered for shared-dependency
                 // aliasing: distinct labels of the same interface must remain

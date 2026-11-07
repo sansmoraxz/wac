@@ -1,0 +1,40 @@
+(component
+  (type (;0;)
+    (instance
+      (export (;0;) "r" (type (sub resource)))
+    )
+  )
+  (import "z" (implements "a:b/c") (instance (;0;) (type 0)))
+  (alias export 0 "r" (type (;1;)))
+  (type (;2;)
+    (instance
+      (alias outer 1 1 (type (;0;)))
+      (export (;1;) "r2" (type (eq 0)))
+    )
+  )
+  (import "a:b/c" (instance (;1;) (type 2)))
+  (type (;3;)
+    (component
+      (type (;0;)
+        (instance
+          (export (;0;) "r" (type (sub resource)))
+        )
+      )
+      (import "z" (implements "a:b/c") (instance (;0;) (type 0)))
+      (alias export 0 "r" (type (;1;)))
+      (type (;2;)
+        (instance
+          (alias outer 1 1 (type (;0;)))
+          (export (;1;) "r2" (type (eq 0)))
+        )
+      )
+      (import "a:b/c" (instance (;1;) (type 2)))
+    )
+  )
+  (import "unlocked-dep=<test:foo>" (component (;0;) (type 3)))
+  (instance (;2;) (instantiate 0
+      (with "z" (instance 0))
+      (with "a:b/c" (instance 1))
+    )
+  )
+)
