@@ -173,6 +173,10 @@ pub struct Scope {
     /// The map of interface and type export name to the index of the type
     /// aliased from an instance of the interface in this or an enclosing scope.
     used_types: HashMap<(InterfaceKey, String), u32>,
+    /// The interface this scope is the instance type of, if any.
+    defining: Option<InterfaceKey>,
+    /// The map of type export names to their indexes in this scope.
+    type_exports: HashMap<String, u32>,
     /// The encodable for this scope.
     encodable: Encodable,
 }
@@ -183,6 +187,21 @@ impl Scope {
         match key {
             InterfaceKey::Name(name) => self.instances.get(name).copied(),
             InterfaceKey::Id(id) => self.interface_instances.get(id).copied(),
+        }
+    }
+
+    /// Determines whether this scope has an interface's types, from an
+    /// instance of it or as the scope defining it.
+    fn has_interface(&self, key: &InterfaceKey) -> bool {
+        self.instance(key).is_some() || self.defining.as_ref() == Some(key)
+    }
+
+    /// Gets the index in this scope of the type export `name` of an interface
+    /// this scope has.
+    fn used_type(&mut self, key: &InterfaceKey, name: &str) -> Option<u32> {
+        match self.instance(key) {
+            Some(instance) => Some(self.alias_type_export(instance, name)),
+            None => self.type_exports.get(name).copied(),
         }
     }
 
@@ -296,12 +315,12 @@ impl State {
         }
     }
 
-    /// Gets how many scopes out from the current one the nearest instance of
-    /// an interface is.
+    /// Gets how many scopes out from the current one the nearest scope having
+    /// an interface's types is.
     fn interface_depth(&self, key: &InterfaceKey) -> Option<usize> {
         std::iter::once(&self.current)
             .chain(self.scopes.iter().rev())
-            .position(|scope| scope.instance(key).is_some())
+            .position(|scope| scope.has_interface(key))
     }
 
     /// Gets how many scopes out from the current one the nearest scope that
@@ -313,11 +332,11 @@ impl State {
             .expect("the outermost scope is a component")
     }
 
-    /// Aliases the type export `name` of the nearest instance of an interface
-    /// into the current scope, through an outer alias if the instance is in an
-    /// enclosing scope.
+    /// Aliases the type export `name` of an interface into the current scope
+    /// from the nearest scope having the interface's types, through an outer
+    /// alias if that scope encloses the current one.
     ///
-    /// Returns `None` if no scope has an instance of the interface.
+    /// Returns `None` if no scope has the interface's types.
     fn alias_used_type(&mut self, interface: InterfaceKey, name: &str) -> Option<u32> {
         let key = (interface, name.to_string());
         if let Some(index) = self.current.used_types.get(&key) {
@@ -325,9 +344,7 @@ impl State {
         }
 
         let depth = self.interface_depth(&key.0)?;
-        let scope = self.scope_mut(depth);
-        let instance = scope.instance(&key.0).expect("the scope has the instance");
-        let index = scope.alias_type_export(instance, name);
+        let index = self.scope_mut(depth).used_type(&key.0, name)?;
         let index = self.alias_outer_type(depth, index);
         self.current.used_types.insert(key, index);
         Some(index)
@@ -569,6 +586,10 @@ impl<'a> TypeEncoder<'a> {
         // Encode any required aliases
         self.use_aliases(state, &interface.uses, &interface.exports)?;
         state.push(Encodable::Instance(InstanceType::default()));
+        state.current.defining = Some(match &interface.id {
+            Some(iid) => InterfaceKey::Name(iid.clone()),
+            None => InterfaceKey::Id(id),
+        });
 
         // Otherwise, export all exports
         for (name, kind) in &interface.exports {
@@ -674,6 +695,16 @@ impl<'a> TypeEncoder<'a> {
         };
         let key = InterfaceKey::Name(iid.clone());
         if state.current.instances.contains_key(iid) {
+            return Ok(());
+        }
+
+        // An interface being defined has no instance yet, so its types are
+        // used from the scope defining it.
+        if state
+            .scopes
+            .iter()
+            .any(|scope| scope.defining.as_ref() == Some(&key))
+        {
             return Ok(());
         }
 
@@ -1281,6 +1312,7 @@ impl<'a> TypeEncoder<'a> {
             // For types, remap to the index of the exported item
             ItemKind::Type(ty) => {
                 state.current.type_indexes.insert(ty, index);
+                state.current.type_exports.insert(name.to_string(), index);
             }
             ItemKind::Instance(id) => {
                 self.record_instance(state, instance_index, id);
@@ -1335,6 +1367,7 @@ impl<'a> TypeEncoder<'a> {
         };
 
         state.current.resources.insert(resource.name.clone(), index);
+        state.current.type_exports.insert(name.to_string(), index);
         self.record_resource(state, id, index);
         Ok(index)
     }

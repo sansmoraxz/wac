@@ -834,12 +834,14 @@ impl TypeAggregator {
             };
         }
 
-        let interface = self.remap_interface_definition(types, id, checker)?;
-        let remapped = self.types.add_interface(interface);
+        // The interface is remapped before its definition is, which can use it
+        // through a component it exports.
+        let remapped = self.types.add_interface(Interface::default());
         let prev = self
             .remapped
             .insert(Type::Interface(id), Type::Interface(remapped));
         assert!(prev.is_none());
+        self.types[remapped] = self.remap_interface_definition(types, id, checker)?;
 
         if let Some(name) = self.types[remapped].id.as_ref() {
             let prev = self.interfaces.insert(name.clone(), remapped);
@@ -861,16 +863,17 @@ impl TypeAggregator {
         id: InterfaceId,
         checker: &mut SubtypeChecker,
     ) -> Result<InterfaceId> {
-        let interface = self.remap_interface_definition(types, id, checker)?;
-        let remapped = self.types.add_interface(interface);
+        let remapped = self.types.add_interface(Interface::default());
 
         // An unnamed interface is only found by what it was remapped to, as
-        // a use of one of its types or an owner of one of its resources.
+        // a use of one of its types or an owner of one of its resources, so
+        // it is remapped before its definition is, which can use it.
         if types[id].id.is_none() {
             self.remapped
                 .entry(Type::Interface(id))
                 .or_insert(Type::Interface(remapped));
         }
+        self.types[remapped] = self.remap_interface_definition(types, id, checker)?;
         Ok(remapped)
     }
 
